@@ -5,6 +5,10 @@ from __future__ import annotations
 from importlib.metadata import PackageNotFoundError, version
 
 from .core import (
+    DEFAULT_MAX_PATHS,
+    NoFeasiblePathError,
+    PathScore,
+    PathSearchLimitError,
     SkeletonEdge,
     SkeletonGraph,
     SkeletonNode,
@@ -27,6 +31,10 @@ except PackageNotFoundError:
     __version__ = "0.0.0+unknown"
 
 __all__ = [
+    "DEFAULT_MAX_PATHS",
+    "NoFeasiblePathError",
+    "PathScore",
+    "PathSearchLimitError",
     "SkeletonEdge",
     "SkeletonGraph",
     "SkeletonNode",
