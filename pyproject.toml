@@ -1,0 +1,75 @@
+[build-system]
+requires = ["setuptools>=69", "wheel", "setuptools_scm[toml]>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "skeletonpaths"
+description = "Skeleton graphs and candidate path extraction from binary masks and skeletons."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {file = "LICENSE"}
+authors = [{name = "Holger Nahrstaedt"}]
+dynamic = ["version"]
+keywords = [
+  "skeleton",
+  "skeletonization",
+  "image-processing",
+  "graph",
+  "centerline",
+  "path-extraction",
+  "vectorization",
+]
+dependencies = [
+  "numpy>=1.24",
+  "scipy>=1.11",
+  "scikit-image>=0.26,<0.27",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Scientific/Engineering :: Image Processing",
+]
+
+[project.urls]
+Homepage = "https://github.com/schreibatlas/skeletonpaths"
+Repository = "https://github.com/schreibatlas/skeletonpaths"
+Issues = "https://github.com/schreibatlas/skeletonpaths/issues"
+Changelog = "https://github.com/schreibatlas/skeletonpaths/releases"
+
+[project.optional-dependencies]
+dev = [
+  "build>=1.2",
+  "pytest>=8",
+  "ruff>=0.8",
+  "twine>=5",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["skeletonpaths*"]
+
+[tool.setuptools_scm]
+write_to = "skeletonpaths/_version.py"
+fallback_version = "0.1.0.dev0"
+version_scheme = "guess-next-dev"
+local_scheme = "node-and-date"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+pythonpath = ["."]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
