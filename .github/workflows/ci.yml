@@ -21,3 +21,42 @@ jobs:
       - run: python -m pip install -e ".[dev]"
       - run: pytest
       - run: ruff check .
+      - run: ruff format --check .
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -U pip
+      - run: python -m pip install ".[dev]"
+      - run: python -m build
+      - run: python -m twine check dist/*
+      - name: Install wheel without image extras and smoke test
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install dist/*.whl
+          mkdir -p /tmp/skeletonpaths-wheel-smoke
+          cd /tmp/skeletonpaths-wheel-smoke
+          "$GITHUB_WORKSPACE/.venv/bin/python" - <<'PY'
+          import importlib.resources
+          import sys
+
+          import numpy as np
+          import skeletonpaths
+
+          assert importlib.resources.files("skeletonpaths").joinpath("py.typed").is_file()
+          assert "scipy" not in sys.modules
+          assert "skimage" not in sys.modules
+
+          skeleton = np.zeros((5, 7), dtype=bool)
+          skeleton[2, 1:6] = True
+          graph = skeletonpaths.graph_from_skeleton(skeleton)
+          selection = skeletonpaths.select_path(graph, path_kind="open")
+          assert graph.endpoint_count == 2
+          assert selection.path.length_px == 4.0
+          PY

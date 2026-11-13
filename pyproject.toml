@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=69", "wheel", "setuptools_scm[toml]>=8"]
+requires = ["setuptools>=77", "wheel", "setuptools_scm[toml]>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,7 +7,8 @@ name = "skeletonpaths"
 description = "Skeleton graphs and candidate path extraction from binary masks and skeletons."
 readme = "README.md"
 requires-python = ">=3.10"
-license = {file = "LICENSE"}
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 authors = [{name = "Holger Nahrstaedt"}]
 dynamic = ["version"]
 keywords = [
@@ -21,15 +22,12 @@ keywords = [
 ]
 dependencies = [
   "numpy>=1.24",
-  "scipy>=1.11",
-  "scikit-image>=0.25.2,<0.27",
   "planarcurve>=0.1,<0.2",
 ]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
   "Intended Audience :: Science/Research",
-  "License :: OSI Approved :: Apache Software License",
   "Operating System :: OS Independent",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.10",
@@ -37,6 +35,7 @@ classifiers = [
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
   "Topic :: Scientific/Engineering :: Image Processing",
+  "Typing :: Typed",
 ]
 
 [project.urls]
@@ -46,9 +45,15 @@ Issues = "https://github.com/schreibatlas/skeletonpaths/issues"
 Changelog = "https://github.com/schreibatlas/skeletonpaths/releases"
 
 [project.optional-dependencies]
+image = [
+  "scipy>=1.11",
+  "scikit-image>=0.25.2,<0.27",
+]
 dev = [
   "build>=1.2",
   "pytest>=8",
+  "scipy>=1.11",
+  "scikit-image>=0.25.2,<0.27",
   "ruff>=0.8",
   "twine>=5",
 ]
@@ -56,6 +61,10 @@ dev = [
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["skeletonpaths*"]
+
+
+[tool.setuptools.package-data]
+skeletonpaths = ["py.typed"]
 
 [tool.setuptools_scm]
 write_to = "skeletonpaths/_version.py"
