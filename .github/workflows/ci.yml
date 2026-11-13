@@ -60,3 +60,17 @@ jobs:
           assert graph.endpoint_count == 2
           assert selection.path.length_px == 4.0
           PY
+
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install -U pip
+      - run: python -m pip install -e . -r docs/requirements.txt
+      - run: python -m sphinx -W --keep-going -b html docs docs/_build/html

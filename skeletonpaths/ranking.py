@@ -274,7 +274,77 @@ def rank_paths(
     max_paths: int | None = None,
     limit: int | None = None,
 ) -> tuple[SkeletonPath, ...]:
-    """Rank feasible routes, optionally returning only the first ``limit`` paths."""
+    """Rank feasible topology routes and materialize ordered path geometries.
+
+    Parameters
+    ----------
+    graph : SkeletonGraph
+        Graph whose routes are searched or whose prepared inventory is ranked.
+    path_kind : str
+        Route kind to consider. ``"open"`` is endpoint-to-endpoint with zero
+        route-level cycles; ``"loop"`` is a closed cycle; ``"open-with-loop"``
+        is endpoint-to-endpoint with exactly one route-level cycle.
+    expected_cycles : int or None
+        Required cycle count of each route. This constrains routes, not the whole
+        graph.
+    expected_endpoints : tuple or None
+        Ordered ``(start, end)`` coordinate expectations in ``(x, y)`` pixel
+        units. Either endpoint may be ``None`` to leave it unconstrained.
+    endpoint_tolerance_px : float
+        Maximum distance in pixels from each specified expected endpoint. Must be
+        finite and nonnegative.
+    expected_length_px : float or None
+        Positive finite expected route length in pixels. When provided, length
+        error is ranking evidence; when omitted, shorter routes are not preferred.
+    candidate_xy : numpy.typing.ArrayLike or None
+        Optional guide polyline with shape ``(N, 2)``, at least two finite,
+        distinct ``(x, y)`` points. It guides ranking but is not a feasibility
+        constraint and does not imply physical direction.
+    path_inventory : TopologyPathInventory or None
+        Optional prepared routes. The inventory must belong to this exact graph
+        object and include ``path_kind``.
+    policy : PathRankingPolicy
+        Sampling, tie, and ambiguity-evidence policy.
+    limits : PathSearchLimits or None
+        Route enumeration bounds. Limits apply independently to each route kind.
+    max_paths : int or None
+        Legacy maximum routes per kind. Mutually exclusive with ``limits``.
+    limit : int or None
+        Positive maximum number of returned ``SkeletonPath`` objects. All
+        feasible candidates are still scored so ordering remains exact.
+
+    Returns
+    -------
+    tuple of SkeletonPath
+        Feasible routes in ranking order. Open routes may appear in both
+        orientations. Returns an empty tuple when no route remains feasible.
+
+    Raises
+    ------
+    ValueError
+        If a route kind, constraint, guide, inventory, or result limit is invalid.
+    TypeError
+        If ``policy`` or ``limits`` has an invalid type.
+    PathSearchLimitError
+        If route enumeration exceeds a configured bound. No partial result is
+        returned.
+
+    Notes
+    -----
+    Feasibility filtering precedes ranking. With ``candidate_xy``, symmetric
+    guide distance is primary; distances within ``guide_tie_tolerance_px`` are
+    grouped by direct numeric tolerance, then endpoint-order error, measured
+    confidence, expected-length error when present, turning cost, and deterministic
+    route identity break ties. Without a guide, measured confidence is primary,
+    followed by expected-length error when present, turning cost, and route
+    identity. Turning cost is normally only a tie-breaker. ``limit`` controls
+    materialized results, not route enumeration or scoring.
+
+    See Also
+    --------
+    select_path : Select the leading route with ambiguity metadata.
+    prepare_topology_paths : Prepare reusable route inventories.
+    """
     if limit is not None:
         if isinstance(limit, bool) or not isinstance(limit, (int, np.integer)) or limit < 1:
             raise ValueError("limit must be a positive integer")
@@ -299,7 +369,11 @@ def rank_paths(
 
 
 def select_topology_path(*args, **kwargs) -> SkeletonPath:
-    """Deprecated compatibility wrapper for :func:`select_path`."""
+    """Deprecated wrapper for :func:`select_path`, returning its ``SkeletonPath``.
+
+    Emits ``DeprecationWarning``. Use ``select_path()`` to obtain the selected
+    path together with ambiguity metadata.
+    """
     warnings.warn(
         "select_topology_path is deprecated; use select_path instead",
         DeprecationWarning,
@@ -322,7 +396,76 @@ def select_path(
     limits: PathSearchLimits | None = None,
     max_paths: int | None = None,
 ) -> PathSelection:
-    """Select the highest-ranked feasible route with its ambiguity metadata."""
+    """Select the highest-ranked feasible route and report selection ambiguity.
+
+    Parameters
+    ----------
+    graph : SkeletonGraph
+        Graph whose routes are searched or whose prepared inventory is selected.
+    path_kind : str
+        Route kind to consider. ``"open"`` is endpoint-to-endpoint with zero
+        route-level cycles; ``"loop"`` is a closed cycle; ``"open-with-loop"``
+        is endpoint-to-endpoint with exactly one route-level cycle.
+    expected_cycles : int or None
+        Required cycle count of each route. This constrains routes, not the whole
+        graph.
+    expected_endpoints : tuple or None
+        Ordered ``(start, end)`` coordinate expectations in ``(x, y)`` pixel
+        units. Either endpoint may be ``None`` to leave it unconstrained.
+    endpoint_tolerance_px : float
+        Maximum distance in pixels from each specified expected endpoint. Must be
+        finite and nonnegative.
+    expected_length_px : float or None
+        Positive finite expected route length in pixels. When provided, length
+        error is ranking evidence; when omitted, shorter routes are not preferred.
+    candidate_xy : numpy.typing.ArrayLike or None
+        Optional guide polyline with shape ``(N, 2)``, at least two finite,
+        distinct ``(x, y)`` points. It guides ranking but is not a feasibility
+        constraint and does not imply physical direction.
+    path_inventory : TopologyPathInventory or None
+        Optional prepared routes. The inventory must belong to this exact graph
+        object and include ``path_kind``.
+    policy : PathRankingPolicy
+        Sampling, tie, and ambiguity-evidence policy.
+    limits : PathSearchLimits or None
+        Route enumeration bounds. Limits apply independently to each route kind.
+    max_paths : int or None
+        Legacy maximum routes per kind. Mutually exclusive with ``limits``.
+
+    Returns
+    -------
+    PathSelection
+        Selected ``path``, route and orientation ambiguity flags, and the count of
+        feasible scored routes. Only the selected ``SkeletonPath`` is materialized.
+
+    Raises
+    ------
+    NoFeasiblePathError
+        If no route satisfies the requested kind and hard feasibility constraints.
+    ValueError
+        If a route kind, constraint, guide, or inventory is invalid.
+    TypeError
+        If ``policy`` or ``limits`` has an invalid type.
+    PathSearchLimitError
+        If route enumeration exceeds a configured bound. No partial result is
+        returned.
+
+    Notes
+    -----
+    Feasibility filtering precedes ranking, and all feasible alternatives are
+    scored because they may affect ambiguity. ``ambiguous`` means another
+    different edge route has overlapping score evidence. ``orientation_ambiguous``
+    means the reversed orientation of the selected edge route remains
+    indistinguishable within endpoint-order evidence. Neither flag changes
+    measured confidence. Candidate geometry guides ranking and orientation; it
+    does not establish physical direction. See ``rank_paths()`` for ranking order
+    and parameter semantics.
+
+    See Also
+    --------
+    rank_paths : Return ranked path objects instead of one selection.
+    prepare_topology_paths : Prepare reusable route inventories.
+    """
     scored = _rank_candidates(
         graph,
         path_kind=path_kind,
@@ -374,7 +517,10 @@ def select_path(
 
 
 def rank_topology_paths(*args, **kwargs) -> tuple[SkeletonPath, ...]:
-    """Deprecated compatibility wrapper for :func:`rank_paths`."""
+    """Deprecated wrapper for :func:`rank_paths`, returning ranked path objects.
+
+    Emits ``DeprecationWarning``. Use ``rank_paths()`` instead.
+    """
     warnings.warn(
         "rank_topology_paths is deprecated; use rank_paths instead",
         DeprecationWarning,

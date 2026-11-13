@@ -13,6 +13,24 @@ DEFAULT_MAX_PATHS = 10_000
 
 @dataclass(frozen=True)
 class SkeletonNode:
+    """Frozen node in a raster-derived topology graph.
+
+    Attributes
+    ----------
+    id : int
+        Nonnegative graph-local node identifier.
+    xy : tuple of float
+        Pixel coordinate as ``(x, y) = (column, row)``.
+    degree : int
+        Number of incident raster-topology neighbors at the node pixel.
+    radius_px : float
+        Radius at the node pixel, in pixels.
+    confidence : float
+        Node confidence in the inclusive range ``[0, 1]``.
+
+    The model is immutable.
+    """
+
     id: int
     xy: Point
     degree: int
@@ -43,6 +61,26 @@ class SkeletonNode:
 
 @dataclass(frozen=True)
 class SkeletonEdge:
+    """Frozen graph edge with ordered pixel geometry.
+
+    Attributes
+    ----------
+    a, b : int
+        Graph-local IDs of the edge's endpoint nodes.
+    xy : numpy.ndarray
+        Read-only ``(N, 2)`` geometry in ``(x, y)`` pixel coordinates, ordered
+        from node ``a`` to node ``b``.
+    length_px : float
+        Polyline length in pixels, consistent with ``xy``.
+    mean_radius_px : float
+        Mean radius sampled along the edge chain, in pixels.
+    confidence : float
+        Mean confidence sampled along the edge chain, in ``[0, 1]``.
+
+    Edge ordering supports geometry assembly and ranking. It does not imply
+    physical drawing direction. The model is immutable.
+    """
+
     a: int
     b: int
     xy: np.ndarray
@@ -81,6 +119,21 @@ class SkeletonEdge:
 
 @dataclass(frozen=True)
 class SkeletonGraph:
+    """Frozen undirected topology graph.
+
+    Attributes
+    ----------
+    nodes : tuple of SkeletonNode
+        Graph nodes in deterministic order.
+    edges : tuple of SkeletonEdge
+        Graph edges in deterministic order.
+
+    Construction validates unique node IDs, known edge endpoints, and agreement
+    between edge geometry endpoints and their referenced nodes. Public geometry
+    uses ``(x, y) = (column, row)`` pixel coordinates. Graph collections are
+    tuples and the model is immutable.
+    """
+
     nodes: tuple[SkeletonNode, ...]
     edges: tuple[SkeletonEdge, ...]
 
@@ -102,6 +155,7 @@ class SkeletonGraph:
 
     @property
     def component_count(self) -> int:
+        """Number of connected components in the graph, or zero for an empty graph."""
         if not self.nodes:
             return 0
         adjacency = {node.id: set() for node in self.nodes}
@@ -122,19 +176,46 @@ class SkeletonGraph:
 
     @property
     def cycle_count(self) -> int:
+        """Graph-level cyclomatic diagnostic, ``max(0, |E| - |V| + components)``.
+
+        This counts cycles in the whole graph. It is distinct from a route's
+        ``cycle_count`` and does not directly constrain route selection.
+        """
         return max(0, len(self.edges) - len(self.nodes) + self.component_count)
 
     @property
     def endpoint_count(self) -> int:
+        """Number of graph nodes whose raster-topology degree is one."""
         return sum(node.degree == 1 for node in self.nodes)
 
     @property
     def junction_count(self) -> int:
+        """Number of graph nodes whose raster-topology degree exceeds two."""
         return sum(node.degree > 2 for node in self.nodes)
 
 
 @dataclass(frozen=True)
 class PathScore:
+    """Measured ranking values for one feasible route.
+
+    Attributes
+    ----------
+    guide_distance_px : float or None
+        Symmetric geometric distance to ``candidate_xy``, in pixels.
+    endpoint_order_error_px : float or None
+        Sum of ordered start/end guide endpoint distances, in pixels.
+    measured_confidence : float
+        Length-weighted route confidence in ``[0, 1]``. This is not a
+        probability that the route is correct.
+    length_error_px : float or None
+        Absolute error from ``expected_length_px``, in pixels.
+    turning_cost : float or None
+        Sampled mean squared turn angle, in squared radians.
+
+    A ``None`` score dimension was not applicable or requested; it does not
+    represent zero. The model is immutable.
+    """
+
     guide_distance_px: float | None
     endpoint_order_error_px: float | None
     measured_confidence: float
@@ -157,10 +238,33 @@ class PathScore:
 
 @dataclass(frozen=True)
 class PathRankingPolicy:
-    """Configure ranking resolution, tie handling, and ambiguity evidence.
+    """Configure route ranking, guide ties, and ambiguity evidence.
 
-    Turning cost remains a deterministic tie-breaker, but does not resolve
-    ambiguity unless ``turning_cost_is_evidence`` is enabled.
+    Attributes
+    ----------
+    guide_samples : int
+        Number of samples used for symmetric candidate-guide distance.
+    turning_samples : int
+        Number of samples used for mean squared turning cost.
+    guide_tie_tolerance_px : float
+        Direct numeric tolerance for grouping guide distances before endpoint
+        order and later ranking dimensions break ties. Distances are not rounded.
+    ambiguity_guide_distance_px : float
+        Maximum guide-distance difference considered overlapping evidence.
+    ambiguity_endpoint_order_px : float
+        Maximum endpoint-order error difference considered overlapping evidence.
+    ambiguity_confidence : float
+        Maximum measured-confidence difference considered overlapping evidence.
+    ambiguity_length_error_px : float
+        Maximum expected-length error difference considered overlapping evidence.
+    ambiguity_turning_cost : float
+        Maximum turning-cost difference considered overlapping when enabled.
+    turning_cost_is_evidence : bool
+        Whether turning-cost separation may reduce ambiguity. Turning cost is
+        otherwise a deterministic ranking tie-breaker only.
+
+    Guide tie tolerance controls ranking order and is separate from the
+    ambiguity tolerances. The model is immutable.
     """
 
     guide_samples: int = 64
@@ -200,6 +304,19 @@ DEFAULT_RANKING_POLICY = PathRankingPolicy()
 
 @dataclass(frozen=True)
 class PathSearchLimits:
+    """Bounds for enumerating topology routes.
+
+    Attributes
+    ----------
+    max_paths : int
+        Maximum completed routes enumerated for each requested route kind.
+    max_states : int
+        Maximum search states expanded for each requested route kind.
+
+    Exceeding either limit raises ``PathSearchLimitError`` rather than returning
+    a partial result. The model is immutable.
+    """
+
     max_paths: int = DEFAULT_MAX_PATHS
     max_states: int = 100_000
 
@@ -215,11 +332,27 @@ DEFAULT_SEARCH_LIMITS = PathSearchLimits()
 
 
 class NoFeasiblePathError(ValueError):
-    """Raised when no route satisfies the requested topology and constraints."""
+    """Raised when no route satisfies the requested kind and constraints.
+
+    ``select_path()`` raises this exception when no feasible route remains.
+    ``rank_paths()`` returns an empty tuple for the same absence of candidates.
+    """
 
 
 class PathSearchLimitError(RuntimeError):
-    """Raised when path or state search limits stop route enumeration."""
+    """Raised when route enumeration exceeds a configured search bound.
+
+    Attributes
+    ----------
+    path_kind : str
+        Route kind whose enumeration exceeded a limit.
+    limit_name : str
+        Search bound that was exceeded.
+    limit_value : int
+        Configured value of the exceeded bound.
+    observed : int
+        Number of paths or states observed at the point the limit was exceeded.
+    """
 
     def __init__(
         self,
@@ -255,6 +388,31 @@ def _resolve_search_limits(
 
 @dataclass(frozen=True)
 class SkeletonPath:
+    """Frozen, ranked route geometry assembled from a topology route.
+
+    Attributes
+    ----------
+    xy : numpy.ndarray
+        Read-only polyline coordinates with shape ``(N, 2)`` in ``(x, y)``
+        pixel units.
+    edge_ids : tuple of int
+        Ordered graph edge IDs forming the route.
+    start_node, end_node : int
+        Node IDs defining this geometry's orientation for assembly and ranking.
+    length_px : float
+        Polyline length in pixels, consistent with ``xy``.
+    confidence : float
+        Length-weighted measured confidence in ``[0, 1]``, not a probability
+        that the route is correct.
+    cycle_count : int
+        Number of cycles in this route, not the whole graph.
+    score : PathScore
+        Measured ranking dimensions for this route.
+
+    Ambiguity belongs to ``PathSelection`` and is intentionally not stored on a
+    ``SkeletonPath``. The model is immutable.
+    """
+
     xy: np.ndarray
     edge_ids: tuple[int, ...]
     start_node: int
@@ -304,6 +462,25 @@ class SkeletonPath:
 
 @dataclass(frozen=True)
 class PathSelection:
+    """Selected path and selection-context ambiguity metadata.
+
+    Attributes
+    ----------
+    path : SkeletonPath
+        Highest-ranked feasible route materialized by the selection.
+    ambiguous : bool
+        Whether another different edge route has overlapping score evidence
+        under the configured ambiguity tolerances.
+    orientation_ambiguous : bool
+        Whether the reversed orientation of this same edge route remains
+        indistinguishable within endpoint-order evidence.
+    feasible_path_count : int
+        Number of scored alternatives satisfying the requested constraints.
+
+    Ambiguity flags describe this selection context and do not change the path's
+    measured confidence. The model is immutable.
+    """
+
     path: SkeletonPath
     ambiguous: bool
     orientation_ambiguous: bool
@@ -325,6 +502,23 @@ class PathSelection:
 
 @dataclass(frozen=True)
 class TopologyRoute:
+    """Topology-level route represented by a connected edge sequence.
+
+    Attributes
+    ----------
+    edge_ids : tuple of int
+        Unique graph edge IDs in traversal order.
+    start_node, end_node : int
+        Endpoint node IDs defining the sequence orientation. A loop has the same
+        start and end node.
+    cycle_count : int
+        Number of cycles in this route, independent of graph-level cycles.
+
+    The edge sequence is connected and has no repeated edge. Its orientation is
+    for topology traversal and geometry assembly, not physical drawing
+    direction. The model is immutable.
+    """
+
     edge_ids: tuple[int, ...]
     start_node: int
     end_node: int
@@ -358,6 +552,21 @@ class TopologyRoute:
 
 @dataclass(frozen=True)
 class TopologyPathInventory:
+    """Reusable route enumeration tied to one exact ``SkeletonGraph`` object.
+
+    Attributes
+    ----------
+    graph : SkeletonGraph
+        The graph instance used to prepare the inventory. Ranking requires that
+        same object.
+    paths_by_kind : collections.abc.Mapping
+        Immutable mapping from selectively prepared route kinds to tuples of
+        ``TopologyRoute`` objects.
+
+    Preparing only needed kinds avoids unnecessary enumeration. Stored route
+    edge sequences consume memory in exchange for reuse. The model is immutable.
+    """
+
     graph: SkeletonGraph
     paths_by_kind: Mapping[Literal["open", "loop", "open-with-loop"], tuple[TopologyRoute, ...]]
 

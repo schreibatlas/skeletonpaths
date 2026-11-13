@@ -61,7 +61,39 @@ def _binary_image(values: ArrayLike, *, name: str) -> np.ndarray:
 
 
 def prune_spurs(skeleton: ArrayLike, min_length_px: float) -> np.ndarray:
-    """Remove endpoint-to-junction branches shorter than the configured length."""
+    """Remove short endpoint-to-junction branches from a binary skeleton.
+
+    Parameters
+    ----------
+    skeleton : numpy.typing.ArrayLike
+        Two-dimensional boolean image or finite numeric image containing only
+        zero and one values.
+    min_length_px : float
+        Finite, nonnegative branch-length threshold in pixels. A branch is
+        removed only when its length is strictly less than this value.
+
+    Returns
+    -------
+    numpy.ndarray
+        Boolean copy of the skeleton after pruning. A zero threshold returns an
+        equivalent copy without pruning; the input dtype is not preserved.
+
+    Raises
+    ------
+    ValueError
+        If the image is not two-dimensional binary data or the threshold is
+        negative or non-finite.
+
+    Notes
+    -----
+    Only endpoint-to-junction branches are candidates. Pruning repeats until no
+    qualifying branch remains. Arbitrary short edges are not removed.
+
+    See Also
+    --------
+    graph_from_skeleton : Build a graph from an already-thinned skeleton.
+    graph_from_mask : Skeletonize a binary mask and build its graph.
+    """
     source = _binary_image(skeleton, name="skeleton")
     if not np.isfinite(min_length_px) or min_length_px < 0.0:
         raise ValueError("minimum spur length must be finite and nonnegative")
@@ -111,7 +143,47 @@ def build_skeleton_graph(
     confidence: ArrayLike | None = None,
     already_skeleton: bool = False,
 ) -> SkeletonGraph:
-    """Skeletonize observed ink and collapse degree-two pixel chains into graph edges."""
+    """Build a graph from observed ink or an already-thinned skeleton.
+
+    Parameters
+    ----------
+    observed_ink : numpy.typing.ArrayLike
+        Two-dimensional boolean image or finite numeric image containing only
+        zero and one values.
+    min_spur_length_px : float
+        Remove endpoint-to-junction branches strictly shorter than this
+        threshold, in pixels. Zero preserves all spurs.
+    radius : numpy.typing.ArrayLike or None
+        Optional finite, nonnegative radius map with the same shape as the image.
+        If omitted, graph node and edge radius values are zero.
+    confidence : numpy.typing.ArrayLike or None
+        Optional finite confidence map with the same shape and values in
+        ``[0, 1]``. If omitted, confidence values are one.
+    already_skeleton : bool
+        If false, skeletonize the observed ink. If true, use the supplied pixels
+        directly as an already-thinned skeleton.
+
+    Returns
+    -------
+    SkeletonGraph
+        Immutable topology graph whose public coordinates are ``(x, y) =
+        (column, row)`` in pixel units.
+
+    Raises
+    ------
+    ValueError
+        If the image, radius map, confidence map, or spur threshold is invalid.
+    ImportError
+        If skeletonization is requested but scikit-image is unavailable.
+
+    Notes
+    -----
+    This lower-level constructor does not derive radius from surrounding ink.
+    Radius derivation for masks is provided by ``graph_from_mask()``. SciPy and
+    scikit-image are imported lazily only by operations that need them. Raster
+    diagonal adjacency uses the bridge-aware rule: a diagonal connects only
+    when neither orthogonal bridge pixel is foreground.
+    """
     ink = _binary_image(observed_ink, name="observed ink")
     if radius is not None:
         radius = np.asarray(radius, dtype=float)
@@ -214,7 +286,45 @@ def graph_from_skeleton(
     radius: ArrayLike | None = None,
     confidence: ArrayLike | None = None,
 ) -> SkeletonGraph:
-    """Build a compact graph from an already-thinned 2-D skeleton."""
+    """Build a graph from an already-thinned binary skeleton.
+
+    Parameters
+    ----------
+    skeleton : numpy.typing.ArrayLike
+        Two-dimensional boolean image or finite numeric image containing only
+        zero and one values. It is used directly and is not skeletonized.
+    min_spur_length : float
+        Remove endpoint-to-junction branches strictly shorter than this
+        threshold, in pixels. Zero preserves all spurs.
+    radius : numpy.typing.ArrayLike or None
+        Optional finite, nonnegative radius map matching ``skeleton``. If
+        omitted, graph radius values are zero.
+    confidence : numpy.typing.ArrayLike or None
+        Optional finite map matching ``skeleton`` with values in ``[0, 1]``. If
+        omitted, confidence values are one.
+
+    Returns
+    -------
+    SkeletonGraph
+        Immutable topology graph with public coordinates in ``(x, y) =
+        (column, row)`` pixel units.
+
+    Raises
+    ------
+    ValueError
+        If the skeleton or supplied maps are invalid.
+
+    Notes
+    -----
+    This is the preferred lightweight entry point for pre-thinned data. It does
+    not require SciPy or scikit-image, does not skeletonize, and does not derive
+    radius from surrounding ink.
+
+    See Also
+    --------
+    graph_from_mask : Build a graph from a binary mask with optional image processing.
+    build_skeleton_graph : Lower-level graph constructor.
+    """
     return build_skeleton_graph(
         skeleton,
         min_spur_length_px=min_spur_length,

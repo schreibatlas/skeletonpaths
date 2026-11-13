@@ -13,12 +13,54 @@ def graph_from_mask(
     confidence: ArrayLike | None = None,
     min_component_area: int = 0,
 ) -> SkeletonGraph:
-    """Build a graph from a binary mask, deriving raster radius when omitted.
+    """Skeletonize a binary mask and build its topology graph.
 
-    Components smaller than ``min_component_area`` pixels are removed. The
-    default of zero keeps all components. Public coordinates are always
-    ``(x=column, y=row)``.
+    Parameters
+    ----------
+    mask : numpy.typing.ArrayLike
+        Two-dimensional boolean image or finite numeric image containing only
+        zero and one values.
+    min_spur_length : float
+        Remove endpoint-to-junction branches strictly shorter than this
+        threshold, in pixels. Zero preserves all spurs.
+    radius : numpy.typing.ArrayLike or None
+        Optional finite, nonnegative radius map matching ``mask``. If omitted,
+        derive radius from the mask with a Euclidean distance transform.
+    confidence : numpy.typing.ArrayLike or None
+        Optional finite confidence map matching ``mask`` with values in
+        ``[0, 1]``. If omitted, confidence values are one.
+    min_component_area : int
+        Remove 8-neighbor mask components smaller than this pixel area before
+        skeletonization. Zero keeps every component.
+
+    Returns
+    -------
+    SkeletonGraph
+        Immutable topology graph with public coordinates in ``(x, y) =
+        (column, row)`` pixel units.
+
+    Raises
+    ------
+    ValueError
+        If the mask, component area, or supplied maps are invalid.
+    ImportError
+        If SciPy is unavailable for automatic radius derivation or requested
+        component filtering, or scikit-image is unavailable for skeletonization.
+
+    Notes
+    -----
+    Component filtering occurs before skeletonization and uses 8-neighbor
+    component labeling. SciPy is required when ``radius`` is omitted and when
+    ``min_component_area`` is positive. Skeletonization requires scikit-image.
+    These dependencies are imported lazily. Use ``graph_from_skeleton()`` for
+    pre-thinned input without image-processing dependencies.
+
+    See Also
+    --------
+    graph_from_skeleton : Build a graph from an already-thinned skeleton.
+    build_skeleton_graph : Lower-level graph constructor.
     """
+
     source = _binary_image(mask, name="mask")
     if (
         isinstance(min_component_area, bool)

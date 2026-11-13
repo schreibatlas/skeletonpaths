@@ -169,10 +169,46 @@ def prepare_topology_paths(
     limits: PathSearchLimits | None = None,
     max_paths: int | None = None,
 ) -> TopologyPathInventory:
-    """Enumerate selected route kinds once, bounded by ``limits``.
+    """Enumerate selected route kinds once for reuse during ranking.
 
-    Search limits apply independently to each requested route kind. The legacy
-    ``max_paths`` argument remains available when no ``limits`` object is given.
+    Parameters
+    ----------
+    graph : SkeletonGraph
+        Graph whose routes are enumerated. The returned inventory belongs to
+        this exact graph object.
+    path_kinds : tuple of str
+        Supported entries are ``"open"``, ``"loop"``, and ``"open-with-loop"``.
+        The default prepares all three kinds.
+        Duplicates and unsupported kinds are invalid; an empty tuple prepares no
+        routes.
+    limits : PathSearchLimits or None
+        Per-route-kind bounds for completed routes and expanded search states.
+    max_paths : int or None
+        Legacy maximum completed routes per route kind. Mutually exclusive with
+        ``limits``.
+
+    Returns
+    -------
+    TopologyPathInventory
+        Inventory containing immutable route tuples keyed by the requested kinds.
+
+    Raises
+    ------
+    TypeError
+        If ``limits`` is not a ``PathSearchLimits`` instance.
+    ValueError
+        If route kinds are unsupported or duplicated, or both ``limits`` and
+        ``max_paths`` are supplied.
+    PathSearchLimitError
+        If enumeration exceeds a configured path or state limit. No partial
+        inventory is returned.
+
+    Notes
+    -----
+    Search limits apply independently to each requested route kind. Selective
+    inventories avoid enumerating kinds that will not be ranked. Stored edge
+    sequences trade memory and initial enumeration cost for reuse across
+    repeated ranking or selection calls.
     """
     limits = _resolve_search_limits(limits, max_paths)
     kinds = tuple(path_kinds)

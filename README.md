@@ -45,6 +45,10 @@ print(selection.ambiguous)
 
 For a binary mask, use `graph_from_mask(mask)`. It skeletonizes the mask, derives a radius map from the source mask when one is not supplied, and retains all connected components by default.
 
+## Documentation
+
+The Sphinx guides and API reference are maintained in the [documentation sources on GitHub](https://github.com/schreibatlas/skeletonpaths/tree/main/docs). They explain graph construction, route selection, ranking and ambiguity, search limits, and the supported API.
+
 ## Processing pipeline
 
 1. Supply a two-dimensional binary mask or already-thinned skeleton. Boolean arrays and finite numeric arrays containing only `0` and `1` are accepted. NaN, infinity, and other numeric values are rejected.
