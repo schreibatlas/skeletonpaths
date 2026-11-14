@@ -1,0 +1,93 @@
+schema_version: 1
+object_type: commit_audit_sheet
+versioning:
+  schema_version: 1
+  revision: 1
+release_version: v0.1.1
+git_base_ref: v0.1.0
+git_base_sha: 6c36856155bc434e13074578b38214a0931b1bd3
+git_head_ref: HEAD
+git_head_sha: 36bb24f8b58d975252913a95588cbc2ecc78fd73
+git_range: 6c36856155bc434e13074578b38214a0931b1bd3..36bb24f8b58d975252913a95588cbc2ecc78fd73
+commit_count: 2
+rows:
+- sha: 32cac5f2ec488c8d5099d7137910ad8c6a440667
+  source_ref: git:32cac5f2ec488c8d5099d7137910ad8c6a440667
+  short_sha: 32cac5f
+  changed_paths:
+  - .codecrate.toml
+  - .github/workflows/ci.yml
+  - .github/workflows/publish.yml
+  - .pre-commit-config.yaml
+  - README.md
+  - examples/01_basic_straight.py
+  - examples/02_spur_pruning.py
+  - examples/03_guided_branch_selection.py
+  - examples/04_loop_detection.py
+  - examples/05_mask_radius_confidence.py
+  - examples/06_inventory_reranking.py
+  - examples/07_planarcurve_interop.py
+  - examples/08_route_ambiguity.py
+  - examples/README.md
+  - pyproject.toml
+  - skeletonpaths/__init__.py
+  - skeletonpaths/core.py
+  - skeletonpaths/graph.py
+  - skeletonpaths/image.py
+  - skeletonpaths/model.py
+  - skeletonpaths/py.typed
+  - skeletonpaths/ranking.py
+  - skeletonpaths/routing.py
+  - tests/test_dependency_modes.py
+  - tests/test_examples.py
+  - tests/test_skeletonpaths.py
+  stats:
+    files_changed: 26
+    insertions: 2158
+    deletions: 1002
+  inspected: false
+  inspected_paths: []
+  observed_behavior: ''
+  public_impact: unknown
+  decision: needs_review
+  stale: false
+  evidence_subject: 'feat: refactoring and improvements'
+- sha: 36bb24f8b58d975252913a95588cbc2ecc78fd73
+  source_ref: git:36bb24f8b58d975252913a95588cbc2ecc78fd73
+  short_sha: 36bb24f
+  changed_paths:
+  - .github/workflows/ci.yml
+  - .readthedocs.yaml
+  - README.md
+  - docs/Makefile
+  - docs/conf.py
+  - docs/examples.md
+  - docs/getting-started.md
+  - docs/guide/ambiguity-and-ranking.md
+  - docs/guide/graph-construction.md
+  - docs/guide/path-selection.md
+  - docs/guide/planarcurve.md
+  - docs/guide/search-limits.md
+  - docs/index.md
+  - docs/make.bat
+  - docs/make.py
+  - docs/reference/api.md
+  - docs/reference/behavior-contracts.md
+  - docs/requirements.txt
+  - pyproject.toml
+  - skeletonpaths/graph.py
+  - skeletonpaths/image.py
+  - skeletonpaths/model.py
+  - skeletonpaths/ranking.py
+  - skeletonpaths/routing.py
+  stats:
+    files_changed: 24
+    insertions: 1427
+    deletions: 21
+  inspected: false
+  inspected_paths: []
+  observed_behavior: ''
+  public_impact: unknown
+  decision: needs_review
+  stale: false
+  evidence_subject: 'doc: docs added'

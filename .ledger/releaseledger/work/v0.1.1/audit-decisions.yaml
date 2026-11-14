@@ -1,0 +1,51 @@
+rows:
+- sha: 32cac5f2ec488c8d5099d7137910ad8c6a440667
+  inspected: true
+  inspected_paths:
+  - README.md
+  - examples/README.md
+  - pyproject.toml
+  - skeletonpaths/__init__.py
+  - skeletonpaths/core.py
+  - skeletonpaths/graph.py
+  - skeletonpaths/image.py
+  - skeletonpaths/model.py
+  - skeletonpaths/ranking.py
+  - skeletonpaths/routing.py
+  - tests/test_dependency_modes.py
+  - tests/test_examples.py
+  - tests/test_skeletonpaths.py
+  observed_behavior: Added separate skeleton and mask graph entry points, introduced ranked selections with route ambiguity metadata, and made image-processing dependencies optional for skeleton-only use.
+  public_impact: public
+  decision: accepted
+  target_entry_key: null
+  target_entry_id: null
+  notes: ''
+  stale: false
+- sha: 36bb24f8b58d975252913a95588cbc2ecc78fd73
+  inspected: true
+  inspected_paths:
+  - .github/workflows/ci.yml
+  - .readthedocs.yaml
+  - README.md
+  - docs/index.md
+  - docs/guide/graph-construction.md
+  - docs/guide/path-selection.md
+  - docs/guide/ambiguity-and-ranking.md
+  - docs/guide/search-limits.md
+  - docs/guide/planarcurve.md
+  - docs/reference/api.md
+  - docs/reference/behavior-contracts.md
+  - pyproject.toml
+  - skeletonpaths/graph.py
+  - skeletonpaths/image.py
+  - skeletonpaths/model.py
+  - skeletonpaths/ranking.py
+  - skeletonpaths/routing.py
+  observed_behavior: Added a Sphinx documentation site and CI builds covering graph construction, input dependencies, route selection, ranking, ambiguity, search limits, and PlanarCurve interoperability.
+  public_impact: docs
+  decision: accepted
+  target_entry_key: null
+  target_entry_id: null
+  notes: ''
+  stale: false

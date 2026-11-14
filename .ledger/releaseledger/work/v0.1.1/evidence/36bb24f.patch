@@ -1,0 +1,1782 @@
+ .github/workflows/ci.yml             |  14 +++
+ .readthedocs.yaml                    |  18 +++
+ README.md                            |   4 +
+ docs/Makefile                        |  32 +++++
+ docs/conf.py                         |  57 +++++++++
+ docs/examples.md                     |  16 +++
+ docs/getting-started.md              |  72 ++++++++++++
+ docs/guide/ambiguity-and-ranking.md  |  65 +++++++++++
+ docs/guide/graph-construction.md     |  76 ++++++++++++
+ docs/guide/path-selection.md         |  47 ++++++++
+ docs/guide/planarcurve.md            |  22 ++++
+ docs/guide/search-limits.md          |  46 ++++++++
+ docs/index.md                        |  42 +++++++
+ docs/make.bat                        | 113 ++++++++++++++++++
+ docs/make.py                         |  80 +++++++++++++
+ docs/reference/api.md                | 115 ++++++++++++++++++
+ docs/reference/behavior-contracts.md |  36 ++++++
+ docs/requirements.txt                |   4 +
+ pyproject.toml                       |   4 +
+ skeletonpaths/graph.py               | 116 +++++++++++++++++-
+ skeletonpaths/image.py               |  50 +++++++-
+ skeletonpaths/model.py               | 221 ++++++++++++++++++++++++++++++++++-
+ skeletonpaths/ranking.py             | 154 +++++++++++++++++++++++-
+ skeletonpaths/routing.py             |  44 ++++++-
+ 24 files changed, 1427 insertions(+), 21 deletions(-)
+
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 3461418..8ecbc4f 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -60,3 +60,17 @@ jobs:
+           assert graph.endpoint_count == 2
+           assert selection.path.length_px == 4.0
+           PY
++
++
++  docs:
++    runs-on: ubuntu-latest
++    steps:
++      - uses: actions/checkout@v4
++        with:
++          fetch-depth: 0
++      - uses: actions/setup-python@v5
++        with:
++          python-version: "3.13"
++      - run: python -m pip install -U pip
++      - run: python -m pip install -e . -r docs/requirements.txt
++      - run: python -m sphinx -W --keep-going -b html docs docs/_build/html
+diff --git a/.readthedocs.yaml b/.readthedocs.yaml
+new file mode 100644
+index 0000000..ea76587
+--- /dev/null
++++ b/.readthedocs.yaml
+@@ -0,0 +1,18 @@
++# Read the Docs configuration file
++# See https://docs.readthedocs.io/en/stable/config-file/v2.html for details
++
++version: 2
++
++build:
++  os: ubuntu-24.04
++  tools:
++    python: "3.13"
++
++sphinx:
++  configuration: docs/conf.py
++
++python:
++  install:
++    - requirements: docs/requirements.txt
++    - method: pip
++      path: .
+diff --git a/README.md b/README.md
+index 6af76ce..71afc0f 100644
+--- a/README.md
++++ b/README.md
+@@ -45,6 +45,10 @@ print(selection.ambiguous)
+
+ For a binary mask, use `graph_from_mask(mask)`. It skeletonizes the mask, derives a radius map from the source mask when one is not supplied, and retains all connected components by default.
+
++## Documentation
++
++The Sphinx guides and API reference are maintained in the [documentation sources on GitHub](https://github.com/schreibatlas/skeletonpaths/tree/main/docs). They explain graph construction, route selection, ranking and ambiguity, search limits, and the supported API.
++
+ ## Processing pipeline
+
+ 1. Supply a two-dimensional binary mask or already-thinned skeleton. Boolean arrays and finite numeric arrays containing only `0` and `1` are accepted. NaN, infinity, and other numeric values are rejected.
+diff --git a/docs/Makefile b/docs/Makefile
+new file mode 100644
+index 0000000..3ff8019
+--- /dev/null
++++ b/docs/Makefile
+@@ -0,0 +1,32 @@
++# Makefile for Sphinx documentation
++
++# You can set these variables from the command line
++SPHINXOPTS    ?=
++SPHINXBUILD   ?= sphinx-build
++SOURCEDIR     = .
++BUILDDIR      = _build
++
++# Put it first so that "make" without argument is like "make help".
++help:
++	@$(SPHINXBUILD) -M help "$(SOURCEDIR)" "$(BUILDDIR)" $(SPHINXOPTS) $(O)
++
++.PHONY: help Makefile clean html livehtml
++
++# Clean build directory
++clean:
++	rm -rf $(BUILDDIR)/*
++
++# Build HTML documentation
++html:
++	@$(SPHINXBUILD) -M html "$(SOURCEDIR)" "$(BUILDDIR)" $(SPHINXOPTS) $(O)
++	@echo
++	@echo "Build finished. The HTML pages are in $(BUILDDIR)/html."
++
++# Live reload server (requires sphinx-autobuild)
++livehtml:
++	sphinx-autobuild "$(SOURCEDIR)" "$(BUILDDIR)/html" $(SPHINXOPTS) $(O)
++
++# Catch-all target: route all unknown targets to Sphinx using the new
++# "make mode" option.  $(O) is meant as a shortcut for $(SPHINXOPTS).
++%: Makefile
++	@$(SPHINXBUILD) -M $@ "$(SOURCEDIR)" "$(BUILDDIR)" $(SPHINXOPTS) $(O)
+diff --git a/docs/conf.py b/docs/conf.py
+new file mode 100644
+index 0000000..6c9230c
+--- /dev/null
++++ b/docs/conf.py
+@@ -0,0 +1,57 @@
++import sys
++from pathlib import Path
++
++DOCS_DIR = Path(__file__).resolve().parent
++ROOT = DOCS_DIR.parent
++sys.path.insert(0, str(ROOT))
++
++project = "skeletonpaths"
++author = "Holger Nahrstaedt"
++copyright = "2026, Holger Nahrstaedt"
++root_doc = "index"
++
++extensions = [
++    "sphinx.ext.autodoc",
++    "sphinx.ext.doctest",
++    "sphinx.ext.intersphinx",
++    "sphinx.ext.napoleon",
++    "sphinx.ext.viewcode",
++    "myst_parser",
++]
++
++source_suffix = {".md": "markdown"}
++myst_enable_extensions = ["colon_fence"]
++myst_heading_anchors = 4
++
++napoleon_google_docstring = False
++napoleon_numpy_docstring = True
++napoleon_include_init_with_doc = True
++napoleon_include_private_with_doc = False
++napoleon_include_special_with_doc = True
++napoleon_use_admonition_for_examples = False
++napoleon_use_admonition_for_notes = False
++napoleon_use_admonition_for_references = False
++napoleon_use_ivar = False
++napoleon_use_param = True
++napoleon_use_rtype = True
++napoleon_preprocess_types = False
++napoleon_type_aliases = None
++napoleon_attr_annotations = True
++
++autodoc_member_order = "bysource"
++autodoc_typehints = "description"
++nitpicky = True
++nitpick_ignore = [("py:class", "numpy.typing.ArrayLike")]
++
++exclude_patterns = ["_build", "Thumbs.db", ".DS_Store", "README.md"]
++
++html_theme = "sphinx_rtd_theme"
++html_theme_options = {
++    "navigation_depth": 4,
++    "titles_only": False,
++}
++
++intersphinx_mapping = {
++    "python": ("https://docs.python.org/3", None),
++    "numpy": ("https://numpy.org/doc/stable", None),
++}
+diff --git a/docs/examples.md b/docs/examples.md
+new file mode 100644
+index 0000000..77d92ac
+--- /dev/null
++++ b/docs/examples.md
+@@ -0,0 +1,16 @@
++# Examples
++
++The scripts in `examples/` are the canonical executable examples. The guides include their source with Sphinx `literalinclude`, rather than maintaining copied code. Use this index to find the relevant script and explanation.
++
++| Script | Topic | Guide |
++| --- | --- | --- |
++| `01_basic_straight.py` | Pre-thinned skeleton and first selection | {doc}`getting-started` |
++| `02_spur_pruning.py` | Explicit opt-in spur pruning | {doc}`guide/graph-construction` |
++| `03_guided_branch_selection.py` | Hard endpoints versus a misleading guide | {doc}`guide/path-selection` |
++| `04_loop_detection.py` | Closed-loop route selection | {doc}`guide/path-selection` |
++| `05_mask_radius_confidence.py` | Mask input, radius derivation, and confidence propagation | {doc}`guide/graph-construction` |
++| `06_inventory_reranking.py` | Reuse of a selective route inventory | {doc}`guide/search-limits` |
++| `07_planarcurve_interop.py` | PlanarCurve geometry interoperability | {doc}`guide/planarcurve` |
++| `08_route_ambiguity.py` | Route ambiguity and guide-based disambiguation | {doc}`guide/ambiguity-and-ranking` |
++
++Run examples from the repository root as documented in `examples/README.md`. Examples 04 and 05 use image-processing dependencies; install `skeletonpaths[image]` for those scripts. The scripts demonstrate topology and ranking behavior, not physical drawing order or pen direction.
+diff --git a/docs/getting-started.md b/docs/getting-started.md
+new file mode 100644
+index 0000000..5c79ba5
+--- /dev/null
++++ b/docs/getting-started.md
+@@ -0,0 +1,72 @@
++# Getting started
++
++## Install
++
++The base package supports pre-thinned skeleton input and does not require SciPy or scikit-image:
++
++```bash
++python -m pip install skeletonpaths
++```
++
++Install the optional image extra for mask skeletonization, automatic mask-radius derivation, or component filtering:
++
++```bash
++python -m pip install "skeletonpaths[image]"
++```
++
++## Build a graph from a skeleton
++
++A skeleton is a two-dimensional binary image. Arrays use `[row, column]` indexing; public geometry uses `(x, y) = (column, row)` in pixel units.
++
++```python
++import numpy as np
++from skeletonpaths import graph_from_skeleton, select_path
++
++skeleton = np.zeros((9, 9), dtype=bool)
++skeleton[4, 1:8] = True
++
++graph = graph_from_skeleton(skeleton)
++selection = select_path(graph, path_kind="open", expected_cycles=0)
++
++print(graph.endpoint_count)  # 2
++print(selection.path.xy)  # public coordinates are (x, y)
++```
++
++Raster pixels with degree other than two become graph nodes. Degree-two chains are compressed into edges. The graph is undirected, so a path's start and end order is for geometry assembly and ranking, not a physical traversal direction. Short spurs are preserved unless a positive pruning threshold is supplied.
++
++The full executable source from `examples/01_basic_straight.py` is included below:
++
++```{literalinclude} ../examples/01_basic_straight.py
++:language: python
++```
++
++## Build a graph from a mask
++
++Use `graph_from_mask()` for binary ink that has not yet been skeletonized:
++
++```python
++from skeletonpaths import graph_from_mask
++
++graph = graph_from_mask(mask)
++```
++
++This workflow requires the `image` extra. It skeletonizes the mask and, when `radius` is omitted, derives a Euclidean distance-transform radius from the mask. Component filtering is opt-in. In contrast, `graph_from_skeleton()` uses pre-thinned pixels directly, does not derive radius, and assigns zero radius values when no radius map is supplied.
++
++See {doc}`guide/graph-construction` for validation, dependency, and propagation details.
++
++## Inspect a selection
++
++{func}`skeletonpaths.select_path` returns a {class}`skeletonpaths.PathSelection`, not a {class}`skeletonpaths.SkeletonPath` directly:
++
++```python
++selection.path.xy
++selection.path.length_px
++selection.path.confidence
++selection.ambiguous
++selection.orientation_ambiguous
++selection.feasible_path_count
++```
++
++`ambiguous` describes competing edge routes in this selection context. `orientation_ambiguous` describes whether the reverse orientation of the selected route remains indistinguishable. Both flags belong to {class}`skeletonpaths.PathSelection`, not {class}`skeletonpaths.SkeletonPath`; neither changes measured confidence, which is not a probability of correctness.
++
++Continue with {doc}`guide/path-selection`, {doc}`guide/ambiguity-and-ranking`, or the {doc}`reference/api`.
+diff --git a/docs/guide/ambiguity-and-ranking.md b/docs/guide/ambiguity-and-ranking.md
+new file mode 100644
+index 0000000..1b06b9d
+--- /dev/null
++++ b/docs/guide/ambiguity-and-ranking.md
+@@ -0,0 +1,65 @@
++# Ambiguity and ranking
++
++Ranking orders feasible routes. Ambiguity describes whether the available score evidence distinguishes alternatives in a particular selection. It is not confidence, and it is not a probability of correctness.
++
++## Ranking with a guide
++
++When `candidate_xy` is supplied, the effective ranking order is:
++
++1. Symmetric guide distance.
++2. For guide distances within `guide_tie_tolerance_px`, endpoint-order error.
++3. Measured confidence.
++4. Expected-length error, when `expected_length_px` is supplied.
++5. Turning cost.
++6. Deterministic route identity tie-breakers.
++
++Guide distances are grouped by direct numeric tolerance. They are not decimal-rounded.
++
++## Ranking without a guide
++
++Without `candidate_xy`, ranking considers:
++
++1. Measured confidence.
++2. Expected-length error, when `expected_length_px` is supplied.
++3. Turning cost.
++4. Deterministic route identity tie-breakers.
++
++An absent expected length does not make shorter routes preferable. Turning cost normally helps deterministic ranking only. It reduces ambiguity only when {class}`skeletonpaths.PathRankingPolicy` `turning_cost_is_evidence=True`.
++
++## Scores and policy
++
++{class}`skeletonpaths.PathScore` contains `guide_distance_px`, `endpoint_order_error_px`, `measured_confidence`, `length_error_px`, and `turning_cost`. Distance and length values are in pixels. Turning cost is sampled mean squared turn angle in squared radians. `None` means a score dimension was not applicable or requested, not zero.
++
++The default {class}`skeletonpaths.PathRankingPolicy` is:
++
++| Field | Default |
++| --- | ---: |
++| `guide_samples` | 64 |
++| `turning_samples` | 64 |
++| `guide_tie_tolerance_px` | `1e-9` |
++| `ambiguity_guide_distance_px` | 0.5 |
++| `ambiguity_endpoint_order_px` | 0.5 |
++| `ambiguity_confidence` | 0.05 |
++| `ambiguity_length_error_px` | 1.0 |
++| `ambiguity_turning_cost` | 0.1 |
++| `turning_cost_is_evidence` | `False` |
++
++Guide tie tolerance controls ranking grouping. The ambiguity tolerances control overlap of score evidence. They are separate policy concepts.
++
++:::{warning}
++{class}`skeletonpaths.SkeletonPath` `confidence` is a measurement propagated from the supplied confidence map, or from default confidence values. It is not the probability that the selected route is correct.
++:::
++
++## Route and orientation ambiguity
++
++{class}`skeletonpaths.PathSelection` `ambiguous` is true when a different edge route has overlapping score evidence within the configured ambiguity tolerances. `orientation_ambiguous` is true when the reversed orientation of the same edge route remains indistinguishable within endpoint-order evidence. Both flags can be true at once.
++
++For example, suppose an upper and lower branch form distinct but equally scored edge routes. The selected edge route also has no ordered endpoint evidence to distinguish its forward and reversed geometry. The selection can then report both a competing-route ambiguity and an orientation ambiguity. Neither flag modifies {class}`skeletonpaths.SkeletonPath` `confidence`.
++
++A candidate guide can help distinguish route geometry or route orientation. It remains ranking guidance, not a hard constraint or a statement of physical drawing direction.
++
++The equal-route and guide-disambiguation example is the canonical executable source:
++
++```{literalinclude} ../../examples/08_route_ambiguity.py
++:language: python
++```
+diff --git a/docs/guide/graph-construction.md b/docs/guide/graph-construction.md
+new file mode 100644
+index 0000000..5659671
+--- /dev/null
++++ b/docs/guide/graph-construction.md
+@@ -0,0 +1,76 @@
++# Graph construction
++
++SkeletonPaths turns a binary raster into an undirected topology graph. Raster indexing and public geometry use different conventions: arrays use `[row, column]`, while {class}`skeletonpaths.SkeletonNode` and {class}`skeletonpaths.SkeletonEdge` geometry, and later path coordinates, use `(x, y) = (column, row)` in pixel units.
++
++## Accepted binary images
++
++Both graph entry points accept a two-dimensional boolean image or a finite numeric image containing only `0` and `1`.
++
++| Input | Accepted? |
++| --- | --- |
++| Boolean values | Yes |
++| Finite numeric zero and one | Yes |
++| NaN or infinity | No |
++| A numeric value such as `2` | No |
++
++Values are not interpreted as foreground merely because they are nonzero.
++
++## Mask versus pre-thinned skeleton
++
++| Behavior | {func}`skeletonpaths.graph_from_skeleton` | {func}`skeletonpaths.graph_from_mask` |
++| --- | --- | --- |
++| Input already thinned | Yes | No |
++| Skeletonization | No | Yes |
++| Automatic radius | No. Radius is zero if absent. | Yes. Uses a Euclidean distance transform if absent. |
++| Component filtering | No | Optional `min_component_area`, before skeletonization |
++| Image extra | Not required | Required for mask processing |
++
++For {func}`skeletonpaths.graph_from_mask`, component filtering labels 8-neighbor mask components and removes components smaller than the requested area. The default `min_component_area=0` keeps every component. SciPy is needed when automatic radius is requested or filtering is enabled. scikit-image is needed to skeletonize. Imports are lazy. Supplying a radius map avoids automatic radius derivation, but does not remove the skeletonization dependency.
++
++{func}`skeletonpaths.graph_from_skeleton` assumes the input is already thinned. It does not infer radius from surrounding ink and can run without SciPy or scikit-image. {func}`skeletonpaths.build_skeleton_graph` is the lower-level constructor. With `already_skeleton=False` it skeletonizes and lazily imports scikit-image; with `already_skeleton=True` it uses the pixels directly. It does not derive a distance-transform radius.
++
++## Pixel adjacency
++
++Orthogonal foreground neighbors connect. A diagonal pair connects only when neither of the two orthogonal bridge pixels is foreground. This bridge-aware diagonal rule is neither plain four-connectivity nor naïve eight-connectivity. An orthogonal bridge suppresses the diagonal edge.
++
++## Graph compression
++
++- Every foreground pixel whose raster-topology degree is not two becomes a node.
++- Degree-two pixel chains collapse into graph edges.
++- An all-degree-two connected component receives a deterministic representative node.
++- Adjacent junction pixels remain separate nodes.
++- Edge length is the assembled polyline length in pixels.
++
++Edge geometry is ordered from endpoint node `a` to endpoint node `b`. This ordering supports geometry assembly and ranking; it does not imply physical drawing direction.
++
++## Spur pruning
++
++Topology is preserved by default. The minimum spur threshold defaults to zero, which is a no-op that returns an equivalent boolean copy. With a positive threshold, only endpoint-to-junction branches are candidates. A branch is pruned only when its length is **strictly less than** the threshold. Pruning repeats until stable. This does not delete arbitrary short graph edges.
++
++See the canonical executable example:
++
++```{literalinclude} ../../examples/02_spur_pruning.py
++:language: python
++```
++
++## Radius and confidence maps
++
++A supplied `radius` map must match the image shape, contain finite values, and be nonnegative. A supplied `confidence` map must match the shape, contain finite values, and lie in `[0, 1]`.
++
++- A node's radius and confidence come from its pixel.
++- An edge's mean radius and confidence are means over its edge-chain pixels.
++- A path's measured confidence is the edge-length-weighted mean of its edge confidences.
++
++When no confidence map is supplied, confidence defaults to one. When no radius map is supplied to the pre-thinned entry point, radius defaults to zero. Mask input instead derives radius automatically unless a radius map is provided.
++
++The mask and confidence example is maintained in `examples/` and included here without copying its source:
++
++```{literalinclude} ../../examples/05_mask_radius_confidence.py
++:language: python
++```
++
++## Graph diagnostics
++
++{class}`skeletonpaths.SkeletonGraph` exposes graph-level `component_count`, `cycle_count`, `endpoint_count`, and `junction_count`. The graph cycle diagnostic is the cyclomatic count `max(0, |E| - |V| + component_count)`. It describes the whole graph, not a route. See {doc}`path-selection` for route-level cycle constraints.
++
++An empty skeleton is valid input and produces an empty graph.
+diff --git a/docs/guide/path-selection.md b/docs/guide/path-selection.md
+new file mode 100644
+index 0000000..dbeea59
+--- /dev/null
++++ b/docs/guide/path-selection.md
+@@ -0,0 +1,47 @@
++# Path selection
++
++Graph construction supplies an undirected topology. Route enumeration produces connected edge sequences, and ranking evaluates only routes that satisfy the requested feasibility constraints. Ordered path geometry is useful for measurement and ranking, but does not establish physical direction.
++
++## Route kinds
++
++- `"open"`: endpoint-to-endpoint route with zero route-level cycles.
++- `"loop"`: closed cycle.
++- `"open-with-loop"`: endpoint-to-endpoint route containing exactly one route-level cycle.
++
++`"open-with-loop"` describes cycles on the selected route, not a route that merely lies in a graph containing a loop. {class}`skeletonpaths.SkeletonGraph` `cycle_count` is a whole-graph diagnostic. {class}`skeletonpaths.TopologyRoute` and {class}`skeletonpaths.SkeletonPath` `cycle_count` values describe the route. Therefore, a loop in another graph component does not prevent selecting an open route with zero route-level cycles.
++
++## `rank_paths()` and `select_path()`
++
++{func}`skeletonpaths.rank_paths` returns ranked {class}`skeletonpaths.SkeletonPath` objects. Where applicable, open routes can appear in both orientations. Its optional `limit` controls how many final path objects are returned, but feasible alternatives are still scored so ordering stays exact.
++
++{func}`skeletonpaths.select_path` returns a {class}`skeletonpaths.PathSelection` containing the selected path, ambiguity flags, and `feasible_path_count`. It materializes only the selected {class}`skeletonpaths.SkeletonPath`, but evaluates feasible alternatives because they can affect ambiguity.
++
++## Feasibility constraints
++
++`path_kind`, `expected_cycles`, and `expected_endpoints` constrain which routes are feasible. `endpoint_tolerance_px` controls the maximum distance from each specified endpoint. For `expected_endpoints=(start, end)`, the order matters: the first point constrains the route start and the second constrains its end. Each endpoint can be `None` to leave that side unconstrained.
++
++`expected_cycles` constrains the selected route's cycle count, not {class}`skeletonpaths.SkeletonGraph` `cycle_count`.
++
++A `candidate_xy` guide affects ranking, not feasibility. It cannot rescue a route that fails a hard endpoint or topology constraint. Candidate and expected endpoint coordinates use `(x, y)` pixel units. A guide must be a finite `(N, 2)` array with at least two distinct points. Symmetric guide distance measures geometric alignment; endpoint-order error can help resolve orientation when guide geometry ties. Guide geometry is not evidence of physical direction.
++
++The hard-endpoint versus misleading-guide behavior is demonstrated by the canonical example:
++
++```{literalinclude} ../../examples/03_guided_branch_selection.py
++:language: python
++```
++
++## Expected length
++
++When supplied, `expected_length_px` is ranking evidence. It is not a hard feasibility limit. When omitted, shorter paths are not automatically preferred.
++
++## No feasible route
++
++{func}`skeletonpaths.rank_paths` returns an empty tuple when no route remains feasible. {func}`skeletonpaths.select_path` raises {class}`skeletonpaths.NoFeasiblePathError` for the same situation.
++
++The loop-routing example is kept in `examples/`:
++
++```{literalinclude} ../../examples/04_loop_detection.py
++:language: python
++```
++
++See {doc}`ambiguity-and-ranking` for effective score ordering and the precise meanings of selection ambiguity.
+diff --git a/docs/guide/planarcurve.md b/docs/guide/planarcurve.md
+new file mode 100644
+index 0000000..ce4dec4
+--- /dev/null
++++ b/docs/guide/planarcurve.md
+@@ -0,0 +1,22 @@
++# PlanarCurve interoperability
++
++SkeletonPaths and PlanarCurve have separate responsibilities.
++
++SkeletonPaths owns:
++
++- raster validation and mask/skeleton entry points,
++- raster connectivity and graph construction,
++- route enumeration and feasibility constraints,
++- ranking policy and ambiguity metadata.
++
++PlanarCurve owns neutral polyline geometry, including arclength resampling, polyline length, curve-to-curve distance, and turning geometry. A selected route's `selection.path.xy` can be passed to PlanarCurve when generic curve operations are needed.
++
++An ordered route geometry is a representation for geometry assembly and ranking. It does not establish pen direction, drawing order, or stroke chronology.
++
++SkeletonPaths does not perform spline or Bezier fitting, infer pen lifts or crossings, attach handwriting semantics, infer true stroke order, or infer physical direction. InkGrammar is provenance context only, not a runtime or conceptual dependency of the public API.
++
++The executable interoperability example is the source of truth for the handoff:
++
++```{literalinclude} ../../examples/07_planarcurve_interop.py
++:language: python
++```
+diff --git a/docs/guide/search-limits.md b/docs/guide/search-limits.md
+new file mode 100644
+index 0000000..1575628
+--- /dev/null
++++ b/docs/guide/search-limits.md
+@@ -0,0 +1,46 @@
++# Search limits and route inventories
++
++Route enumeration can grow exponentially on branched or cyclic graphs. Limits bound route enumeration, and exceeding a limit raises {class}`skeletonpaths.PathSearchLimitError` instead of returning partial results.
++
++## Default bounds
++
++```python
++DEFAULT_SEARCH_LIMITS.max_paths  # 10_000
++DEFAULT_SEARCH_LIMITS.max_states  # 100_000
++```
++
++{class}`skeletonpaths.PathSearchLimits` `max_paths` bounds completed routes. `max_states` bounds expanded search states. Limits apply independently to each requested route kind. The exception reports `path_kind`, `limit_name`, `limit_value`, and `observed`.
++
++The older `max_paths` keyword remains available for compatibility. `limits` and `max_paths` are mutually exclusive.
++
++## Prepared inventories
++
++{func}`skeletonpaths.prepare_topology_paths` enumerates selected route kinds once and returns a {class}`skeletonpaths.TopologyPathInventory`:
++
++```python
++inventory = prepare_topology_paths(
++    graph,
++    path_kinds=("open",),
++)
++```
++
++An inventory belongs to the exact graph object used to create it. A later request for a route kind absent from the inventory raises `ValueError`. Selective inventories avoid enumerating unneeded kinds; the default prepares `"open"`, `"loop"`, and `"open-with-loop"`. Its mapping and route collections are immutable, while retaining the enumerated edge sequences in memory. This trades memory and initial enumeration cost for reuse during repeated ranking or selection.
++
++The reusable inventory example is maintained as executable source in `examples/`:
++
++```{literalinclude} ../../examples/06_inventory_reranking.py
++:language: python
++```
++
++## Do not confuse the two `limit` controls
++
++:::{admonition} Route enumeration versus returned objects
++:class: important
++
++- `PathSearchLimits.max_paths` bounds route enumeration for each requested route kind.
++- {func}`skeletonpaths.rank_paths` bounds the number of final `SkeletonPath` objects returned.
++
++The result `limit` does not prevent route enumeration. {func}`skeletonpaths.rank_paths` still scores all feasible candidates to preserve exact ordering, then materializes only the requested number of path objects.
++:::
++
++{func}`skeletonpaths.select_path` likewise considers feasible alternatives for ambiguity while materializing only the selected `SkeletonPath`. Search limits bound the enumeration stage, not every later geometry-scoring operation.
+diff --git a/docs/index.md b/docs/index.md
+new file mode 100644
+index 0000000..9fae8cc
+--- /dev/null
++++ b/docs/index.md
+@@ -0,0 +1,42 @@
++# SkeletonPaths
++
++SkeletonPaths converts binary masks and precomputed skeletons into compact topology graphs and ranked candidate routes. It does **not** infer physical drawing order or pen direction.
++
++SkeletonPaths accepts images indexed as `[row, column]`, but all public geometric coordinates are returned as `(x, y) = (column, row)` in pixel units.
++
++## Choose an input
++
++| Input | Entry point | Installation |
++| --- | --- | --- |
++| Already-thinned skeleton | {func}`skeletonpaths.graph_from_skeleton` | Base package |
++| Binary ink mask | {func}`skeletonpaths.graph_from_mask` | `skeletonpaths[image]` |
++
++```python
++import numpy as np
++from skeletonpaths import graph_from_skeleton, select_path
++
++skeleton = np.zeros((9, 9), dtype=bool)
++skeleton[4, 1:8] = True
++graph = graph_from_skeleton(skeleton)
++selection = select_path(graph, path_kind="open")
++print(selection.path.xy)  # (x, y) pixel coordinates
++```
++
++The selected route is an oriented geometry assembled from an undirected topology. Its ordering is not evidence of a stroke's physical direction.
++
++```{toctree}
++:maxdepth: 2
++:hidden:
++
++getting-started
++examples
++guide/graph-construction
++guide/path-selection
++guide/ambiguity-and-ranking
++guide/search-limits
++guide/planarcurve
++reference/behavior-contracts
++reference/api
++```
++
++Start with the {doc}`getting-started` guide. The conceptual guides explain {doc}`guide/graph-construction`, {doc}`guide/path-selection`, {doc}`guide/ambiguity-and-ranking`, and {doc}`guide/search-limits`. See the {doc}`reference/behavior-contracts` and {doc}`reference/api` for exact guarantees and the supported package-root API.
+diff --git a/docs/make.bat b/docs/make.bat
+new file mode 100644
+index 0000000..d6a9242
+--- /dev/null
++++ b/docs/make.bat
+@@ -0,0 +1,113 @@
++@ECHO OFF
++
++REM Command file for Sphinx documentation
++
++set SPHINXBUILD=sphinx-build
++set BUILDDIR=build
++set ALLSPHINXOPTS=-d %BUILDDIR%/doctrees %SPHINXOPTS% .
++if NOT "%PAPER%" == "" (
++	set ALLSPHINXOPTS=-D latex_paper_size=%PAPER% %ALLSPHINXOPTS%
++)
++
++if "%1" == "" goto help
++
++if "%1" == "help" (
++	:help
++	echo.Please use `make ^<target^>` where ^<target^> is one of
++	echo.  html      to make standalone HTML files
++	echo.  dirhtml   to make HTML files named index.html in directories
++	echo.  pickle    to make pickle files
++	echo.  json      to make JSON files
++	echo.  htmlhelp  to make HTML files and a HTML help project
++	echo.  qthelp    to make HTML files and a qthelp project
++	echo.  latex     to make LaTeX files, you can set PAPER=a4 or PAPER=letter
++	echo.  changes   to make an overview over all changed/added/deprecated items
++	echo.  linkcheck to check all external links for integrity
++	echo.  doctest   to run all doctests embedded in the documentation if enabled
++	goto end
++)
++
++if "%1" == "clean" (
++	for /d %%i in (%BUILDDIR%\*) do rmdir /q /s %%i
++	del /q /s %BUILDDIR%\*
++	goto end
++)
++
++if "%1" == "html" (
++	%SPHINXBUILD% -b html %ALLSPHINXOPTS% %BUILDDIR%/html
++	echo.
++	echo.Build finished. The HTML pages are in %BUILDDIR%/html.
++	goto end
++)
++
++if "%1" == "dirhtml" (
++	%SPHINXBUILD% -b dirhtml %ALLSPHINXOPTS% %BUILDDIR%/dirhtml
++	echo.
++	echo.Build finished. The HTML pages are in %BUILDDIR%/dirhtml.
++	goto end
++)
++
++if "%1" == "pickle" (
++	%SPHINXBUILD% -b pickle %ALLSPHINXOPTS% %BUILDDIR%/pickle
++	echo.
++	echo.Build finished; now you can process the pickle files.
++	goto end
++)
++
++if "%1" == "json" (
++	%SPHINXBUILD% -b json %ALLSPHINXOPTS% %BUILDDIR%/json
++	echo.
++	echo.Build finished; now you can process the JSON files.
++	goto end
++)
++
++if "%1" == "htmlhelp" (
++	%SPHINXBUILD% -b htmlhelp %ALLSPHINXOPTS% %BUILDDIR%/htmlhelp
++	echo.
++	echo.Build finished; now you can run HTML Help Workshop with the ^
++.hhp project file in %BUILDDIR%/htmlhelp.
++	goto end
++)
++
++if "%1" == "qthelp" (
++	%SPHINXBUILD% -b qthelp %ALLSPHINXOPTS% %BUILDDIR%/qthelp
++	echo.
++	echo.Build finished; now you can run "qcollectiongenerator" with the ^
++.qhcp project file in %BUILDDIR%/qthelp, like this:
++	echo.^> qcollectiongenerator %BUILDDIR%\qthelp\PyWavelets.qhcp
++	echo.To view the help file:
++	echo.^> assistant -collectionFile %BUILDDIR%\qthelp\PyWavelets.ghc
++	goto end
++)
++
++if "%1" == "latex" (
++	%SPHINXBUILD% -b latex %ALLSPHINXOPTS% %BUILDDIR%/latex
++	echo.
++	echo.Build finished; the LaTeX files are in %BUILDDIR%/latex.
++	goto end
++)
++
++if "%1" == "changes" (
++	%SPHINXBUILD% -b changes %ALLSPHINXOPTS% %BUILDDIR%/changes
++	echo.
++	echo.The overview file is in %BUILDDIR%/changes.
++	goto end
++)
++
++if "%1" == "linkcheck" (
++	%SPHINXBUILD% -b linkcheck %ALLSPHINXOPTS% %BUILDDIR%/linkcheck
++	echo.
++	echo.Link check complete; look for any errors in the above output ^
++or in %BUILDDIR%/linkcheck/output.txt.
++	goto end
++)
++
++if "%1" == "doctest" (
++	%SPHINXBUILD% -b doctest %ALLSPHINXOPTS% %BUILDDIR%/doctest
++	echo.
++	echo.Testing of doctests in the sources finished, look at the ^
++results in %BUILDDIR%/doctest/output.txt.
++	goto end
++)
++
++:end
+diff --git a/docs/make.py b/docs/make.py
+new file mode 100755
+index 0000000..b3a70dc
+--- /dev/null
++++ b/docs/make.py
+@@ -0,0 +1,80 @@
++#!/usr/bin/env python
++"""Build SkeletonPaths documentation with Sphinx.
++
++Run ``python docs/make.py [target]`` from the repository root or run
++``python make.py [target]`` from ``docs/``.
++
++Targets include ``clean``, ``html``, ``dirhtml``, ``latex``, ``text``,
++``man``, ``changes``, ``linkcheck``, ``doctest``, ``all``, and ``help``.
++"""
++
++import shutil
++import subprocess
++import sys
++from pathlib import Path
++
++DOCS_DIR = Path(__file__).resolve().parent
++BUILD_DIR = DOCS_DIR / "_build"
++VALID_TARGETS = {
++    "html",
++    "dirhtml",
++    "latex",
++    "latexpdf",
++    "text",
++    "man",
++    "changes",
++    "linkcheck",
++    "doctest",
++    "all",
++}
++
++
++def run_sphinx(target: str) -> None:
++    """Run a strict Sphinx build for one output format."""
++    output = BUILD_DIR / target
++    subprocess.run(
++        [
++            sys.executable,
++            "-m",
++            "sphinx",
++            "-W",
++            "--keep-going",
++            "-b",
++            target,
++            str(DOCS_DIR),
++            str(output),
++        ],
++        check=True,
++    )
++
++
++def main() -> int:
++    """Run the requested documentation target."""
++    target = "html" if len(sys.argv) < 2 else sys.argv[1]
++
++    if target == "clean":
++        if BUILD_DIR.exists():
++            print(f"Cleaning {BUILD_DIR}...")
++            shutil.rmtree(BUILD_DIR)
++        return 0
++
++    if target == "help":
++        print(__doc__)
++        return 0
++
++    if target not in VALID_TARGETS:
++        print(f"Unknown target: {target}")
++        print("Use 'help' target for help")
++        return 1
++
++    targets = ("html", "dirhtml", "latex") if target == "all" else (target,)
++    for output_format in targets:
++        print(f"Building {output_format} documentation...")
++        run_sphinx(output_format)
++
++    print(f"Build finished. Documentation is in {BUILD_DIR / target}")
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/docs/reference/api.md b/docs/reference/api.md
+new file mode 100644
+index 0000000..0f263e1
+--- /dev/null
++++ b/docs/reference/api.md
+@@ -0,0 +1,115 @@
++# API reference
++
++The package root, `skeletonpaths`, is the supported import surface. The explicit directives below document the public exports. Function signatures and object definitions are generated from Python objects, not maintained in prose.
++
++## Graph construction
++
++```{eval-rst}
++.. autofunction:: skeletonpaths.graph_from_skeleton
++```
++
++```{eval-rst}
++.. autofunction:: skeletonpaths.graph_from_mask
++```
++
++```{eval-rst}
++.. autofunction:: skeletonpaths.build_skeleton_graph
++```
++
++```{eval-rst}
++.. autofunction:: skeletonpaths.prune_spurs
++```
++
++## Route enumeration, ranking, and selection
++
++```{eval-rst}
++.. autofunction:: skeletonpaths.prepare_topology_paths
++```
++
++```{eval-rst}
++.. autofunction:: skeletonpaths.rank_paths
++```
++
++```{eval-rst}
++.. autofunction:: skeletonpaths.select_path
++```
++
++## Data models
++
++```{eval-rst}
++.. autoclass:: skeletonpaths.SkeletonNode
++```
++
++```{eval-rst}
++.. autoclass:: skeletonpaths.SkeletonEdge
++```
++
++```{eval-rst}
++.. autoclass:: skeletonpaths.SkeletonGraph
++```
++
++```{eval-rst}
++.. autoclass:: skeletonpaths.TopologyRoute
++```
++
++```{eval-rst}
++.. autoclass:: skeletonpaths.SkeletonPath
++```
++
++```{eval-rst}
++.. autoclass:: skeletonpaths.PathScore
++```
++
++```{eval-rst}
++.. autoclass:: skeletonpaths.PathSelection
++```
++
++```{eval-rst}
++.. autoclass:: skeletonpaths.TopologyPathInventory
++```
++
++```{eval-rst}
++.. autoclass:: skeletonpaths.PathRankingPolicy
++```
++
++```{eval-rst}
++.. autoclass:: skeletonpaths.PathSearchLimits
++```
++
++## Constants
++
++`DEFAULT_MAX_PATHS` is the legacy default completed-route bound per route kind. The default search object also sets the independent expanded-state bound.
++
++```{eval-rst}
++.. autodata:: skeletonpaths.DEFAULT_MAX_PATHS
++```
++
++```{eval-rst}
++.. autodata:: skeletonpaths.DEFAULT_RANKING_POLICY
++```
++
++```{eval-rst}
++.. autodata:: skeletonpaths.DEFAULT_SEARCH_LIMITS
++```
++
++## Errors
++
++```{eval-rst}
++.. autoclass:: skeletonpaths.NoFeasiblePathError
++```
++
++```{eval-rst}
++.. autoclass:: skeletonpaths.PathSearchLimitError
++```
++
++## Deprecated compatibility wrappers
++
++These names remain available for compatibility and emit `DeprecationWarning`. Prefer `rank_paths()` and `select_path()`.
++
++```{eval-rst}
++.. autofunction:: skeletonpaths.rank_topology_paths
++```
++
++```{eval-rst}
++.. autofunction:: skeletonpaths.select_topology_path
++```
+diff --git a/docs/reference/behavior-contracts.md b/docs/reference/behavior-contracts.md
+new file mode 100644
+index 0000000..beab3bf
+--- /dev/null
++++ b/docs/reference/behavior-contracts.md
+@@ -0,0 +1,36 @@
++# Behavior contracts
++
++This page collects concise integration guarantees. See the {doc}`../guide/graph-construction`, {doc}`../guide/path-selection`, and {doc}`../guide/ambiguity-and-ranking` guides for explanations.
++
++## Coordinates and topology
++
++Raster arrays use `[row, column]` indexing. Public geometry uses `(x, y) = (column, row)` in pixel units. Graph topology is undirected. Route start/end order exists for geometry assembly and ranking, not as evidence of physical drawing direction.
++
++{class}`skeletonpaths.SkeletonGraph` `cycle_count` is graph-level. {class}`skeletonpaths.TopologyRoute` and {class}`skeletonpaths.SkeletonPath` `cycle_count` values are route-level. `expected_cycles` constrains the route being considered, not every component of the graph.
++
++## Immutability
++
++Public models are frozen. Graph node and edge collections are tuples. {class}`skeletonpaths.SkeletonEdge` `xy` and {class}`skeletonpaths.SkeletonPath` `xy` arrays are read-only. A {class}`skeletonpaths.TopologyPathInventory` exposes an immutable mapping whose route collections are tuples.
++
++## Empty input
++
++An empty skeleton is valid and produces an empty {class}`skeletonpaths.SkeletonGraph`.
++
++## Validation
++
++- Binary images are two-dimensional booleans or finite numeric arrays containing only zero and one.
++- Radius maps match the image shape and contain finite, nonnegative values.
++- Confidence maps match the image shape and contain finite values in `[0, 1]`.
++- Candidate geometry is finite `(N, 2)` data with at least two distinct `(x, y)` points.
++- Ranking policies and search limits validate their sample counts, tolerances, and bounds.
++- Invalid inputs raise `ValueError` or `TypeError` as appropriate. Image-only dependency failures are raised lazily by the operations that need those dependencies.
++
++## Determinism and stability
++
++Traversal and tie-breakers are deterministic for a fixed package version, input, and policy. The pre-1.0 project does not promise identical ordering across versions. Public APIs may change in minor releases before 1.0.
++
++## Deprecated names
++
++{func}`skeletonpaths.rank_topology_paths` is deprecated in favor of {func}`skeletonpaths.rank_paths`. {func}`skeletonpaths.select_topology_path` is deprecated in favor of {func}`skeletonpaths.select_path`. Both compatibility wrappers emit `DeprecationWarning` and forward to the supported functions.
++
++See the {doc}`api` for the package-root imports and full object documentation.
+diff --git a/docs/requirements.txt b/docs/requirements.txt
+new file mode 100644
+index 0000000..86b3ac3
+--- /dev/null
++++ b/docs/requirements.txt
+@@ -0,0 +1,4 @@
++sphinx>=7.0
++sphinx-rtd-theme>=2.0
++sphinx-autobuild>=2024.0
++myst-parser>=2.0
+diff --git a/pyproject.toml b/pyproject.toml
+index 0dc51c4..9ae474c 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -83,3 +83,7 @@ line-length = 100
+
+ [tool.ruff.lint]
+ select = ["E", "F", "I", "UP", "B", "SIM"]
++
++
++[tool.ruff.format]
++exclude = ["skeletonpaths_docs_implementation_brief.md"]
+diff --git a/skeletonpaths/graph.py b/skeletonpaths/graph.py
+index 5366751..c929242 100644
+--- a/skeletonpaths/graph.py
++++ b/skeletonpaths/graph.py
+@@ -61,7 +61,39 @@ def _binary_image(values: ArrayLike, *, name: str) -> np.ndarray:
+
+
+ def prune_spurs(skeleton: ArrayLike, min_length_px: float) -> np.ndarray:
+-    """Remove endpoint-to-junction branches shorter than the configured length."""
++    """Remove short endpoint-to-junction branches from a binary skeleton.
++
++    Parameters
++    ----------
++    skeleton : numpy.typing.ArrayLike
++        Two-dimensional boolean image or finite numeric image containing only
++        zero and one values.
++    min_length_px : float
++        Finite, nonnegative branch-length threshold in pixels. A branch is
++        removed only when its length is strictly less than this value.
++
++    Returns
++    -------
++    numpy.ndarray
++        Boolean copy of the skeleton after pruning. A zero threshold returns an
++        equivalent copy without pruning; the input dtype is not preserved.
++
++    Raises
++    ------
++    ValueError
++        If the image is not two-dimensional binary data or the threshold is
++        negative or non-finite.
++
++    Notes
++    -----
++    Only endpoint-to-junction branches are candidates. Pruning repeats until no
++    qualifying branch remains. Arbitrary short edges are not removed.
++
++    See Also
++    --------
++    graph_from_skeleton : Build a graph from an already-thinned skeleton.
++    graph_from_mask : Skeletonize a binary mask and build its graph.
++    """
+     source = _binary_image(skeleton, name="skeleton")
+     if not np.isfinite(min_length_px) or min_length_px < 0.0:
+         raise ValueError("minimum spur length must be finite and nonnegative")
+@@ -111,7 +143,47 @@ def build_skeleton_graph(
+     confidence: ArrayLike | None = None,
+     already_skeleton: bool = False,
+ ) -> SkeletonGraph:
+-    """Skeletonize observed ink and collapse degree-two pixel chains into graph edges."""
++    """Build a graph from observed ink or an already-thinned skeleton.
++
++    Parameters
++    ----------
++    observed_ink : numpy.typing.ArrayLike
++        Two-dimensional boolean image or finite numeric image containing only
++        zero and one values.
++    min_spur_length_px : float
++        Remove endpoint-to-junction branches strictly shorter than this
++        threshold, in pixels. Zero preserves all spurs.
++    radius : numpy.typing.ArrayLike or None
++        Optional finite, nonnegative radius map with the same shape as the image.
++        If omitted, graph node and edge radius values are zero.
++    confidence : numpy.typing.ArrayLike or None
++        Optional finite confidence map with the same shape and values in
++        ``[0, 1]``. If omitted, confidence values are one.
++    already_skeleton : bool
++        If false, skeletonize the observed ink. If true, use the supplied pixels
++        directly as an already-thinned skeleton.
++
++    Returns
++    -------
++    SkeletonGraph
++        Immutable topology graph whose public coordinates are ``(x, y) =
++        (column, row)`` in pixel units.
++
++    Raises
++    ------
++    ValueError
++        If the image, radius map, confidence map, or spur threshold is invalid.
++    ImportError
++        If skeletonization is requested but scikit-image is unavailable.
++
++    Notes
++    -----
++    This lower-level constructor does not derive radius from surrounding ink.
++    Radius derivation for masks is provided by ``graph_from_mask()``. SciPy and
++    scikit-image are imported lazily only by operations that need them. Raster
++    diagonal adjacency uses the bridge-aware rule: a diagonal connects only
++    when neither orthogonal bridge pixel is foreground.
++    """
+     ink = _binary_image(observed_ink, name="observed ink")
+     if radius is not None:
+         radius = np.asarray(radius, dtype=float)
+@@ -214,7 +286,45 @@ def graph_from_skeleton(
+     radius: ArrayLike | None = None,
+     confidence: ArrayLike | None = None,
+ ) -> SkeletonGraph:
+-    """Build a compact graph from an already-thinned 2-D skeleton."""
++    """Build a graph from an already-thinned binary skeleton.
++
++    Parameters
++    ----------
++    skeleton : numpy.typing.ArrayLike
++        Two-dimensional boolean image or finite numeric image containing only
++        zero and one values. It is used directly and is not skeletonized.
++    min_spur_length : float
++        Remove endpoint-to-junction branches strictly shorter than this
++        threshold, in pixels. Zero preserves all spurs.
++    radius : numpy.typing.ArrayLike or None
++        Optional finite, nonnegative radius map matching ``skeleton``. If
++        omitted, graph radius values are zero.
++    confidence : numpy.typing.ArrayLike or None
++        Optional finite map matching ``skeleton`` with values in ``[0, 1]``. If
++        omitted, confidence values are one.
++
++    Returns
++    -------
++    SkeletonGraph
++        Immutable topology graph with public coordinates in ``(x, y) =
++        (column, row)`` pixel units.
++
++    Raises
++    ------
++    ValueError
++        If the skeleton or supplied maps are invalid.
++
++    Notes
++    -----
++    This is the preferred lightweight entry point for pre-thinned data. It does
++    not require SciPy or scikit-image, does not skeletonize, and does not derive
++    radius from surrounding ink.
++
++    See Also
++    --------
++    graph_from_mask : Build a graph from a binary mask with optional image processing.
++    build_skeleton_graph : Lower-level graph constructor.
++    """
+     return build_skeleton_graph(
+         skeleton,
+         min_spur_length_px=min_spur_length,
+diff --git a/skeletonpaths/image.py b/skeletonpaths/image.py
+index a1d33a0..f5447ff 100644
+--- a/skeletonpaths/image.py
++++ b/skeletonpaths/image.py
+@@ -13,12 +13,54 @@ def graph_from_mask(
+     confidence: ArrayLike | None = None,
+     min_component_area: int = 0,
+ ) -> SkeletonGraph:
+-    """Build a graph from a binary mask, deriving raster radius when omitted.
++    """Skeletonize a binary mask and build its topology graph.
+
+-    Components smaller than ``min_component_area`` pixels are removed. The
+-    default of zero keeps all components. Public coordinates are always
+-    ``(x=column, y=row)``.
++    Parameters
++    ----------
++    mask : numpy.typing.ArrayLike
++        Two-dimensional boolean image or finite numeric image containing only
++        zero and one values.
++    min_spur_length : float
++        Remove endpoint-to-junction branches strictly shorter than this
++        threshold, in pixels. Zero preserves all spurs.
++    radius : numpy.typing.ArrayLike or None
++        Optional finite, nonnegative radius map matching ``mask``. If omitted,
++        derive radius from the mask with a Euclidean distance transform.
++    confidence : numpy.typing.ArrayLike or None
++        Optional finite confidence map matching ``mask`` with values in
++        ``[0, 1]``. If omitted, confidence values are one.
++    min_component_area : int
++        Remove 8-neighbor mask components smaller than this pixel area before
++        skeletonization. Zero keeps every component.
++
++    Returns
++    -------
++    SkeletonGraph
++        Immutable topology graph with public coordinates in ``(x, y) =
++        (column, row)`` pixel units.
++
++    Raises
++    ------
++    ValueError
++        If the mask, component area, or supplied maps are invalid.
++    ImportError
++        If SciPy is unavailable for automatic radius derivation or requested
++        component filtering, or scikit-image is unavailable for skeletonization.
++
++    Notes
++    -----
++    Component filtering occurs before skeletonization and uses 8-neighbor
++    component labeling. SciPy is required when ``radius`` is omitted and when
++    ``min_component_area`` is positive. Skeletonization requires scikit-image.
++    These dependencies are imported lazily. Use ``graph_from_skeleton()`` for
++    pre-thinned input without image-processing dependencies.
++
++    See Also
++    --------
++    graph_from_skeleton : Build a graph from an already-thinned skeleton.
++    build_skeleton_graph : Lower-level graph constructor.
+     """
++
+     source = _binary_image(mask, name="mask")
+     if (
+         isinstance(min_component_area, bool)
+diff --git a/skeletonpaths/model.py b/skeletonpaths/model.py
+index 20557ad..a490e13 100644
+--- a/skeletonpaths/model.py
++++ b/skeletonpaths/model.py
+@@ -13,6 +13,24 @@ DEFAULT_MAX_PATHS = 10_000
+
+ @dataclass(frozen=True)
+ class SkeletonNode:
++    """Frozen node in a raster-derived topology graph.
++
++    Attributes
++    ----------
++    id : int
++        Nonnegative graph-local node identifier.
++    xy : tuple of float
++        Pixel coordinate as ``(x, y) = (column, row)``.
++    degree : int
++        Number of incident raster-topology neighbors at the node pixel.
++    radius_px : float
++        Radius at the node pixel, in pixels.
++    confidence : float
++        Node confidence in the inclusive range ``[0, 1]``.
++
++    The model is immutable.
++    """
++
+     id: int
+     xy: Point
+     degree: int
+@@ -43,6 +61,26 @@ class SkeletonNode:
+
+ @dataclass(frozen=True)
+ class SkeletonEdge:
++    """Frozen graph edge with ordered pixel geometry.
++
++    Attributes
++    ----------
++    a, b : int
++        Graph-local IDs of the edge's endpoint nodes.
++    xy : numpy.ndarray
++        Read-only ``(N, 2)`` geometry in ``(x, y)`` pixel coordinates, ordered
++        from node ``a`` to node ``b``.
++    length_px : float
++        Polyline length in pixels, consistent with ``xy``.
++    mean_radius_px : float
++        Mean radius sampled along the edge chain, in pixels.
++    confidence : float
++        Mean confidence sampled along the edge chain, in ``[0, 1]``.
++
++    Edge ordering supports geometry assembly and ranking. It does not imply
++    physical drawing direction. The model is immutable.
++    """
++
+     a: int
+     b: int
+     xy: np.ndarray
+@@ -81,6 +119,21 @@ class SkeletonEdge:
+
+ @dataclass(frozen=True)
+ class SkeletonGraph:
++    """Frozen undirected topology graph.
++
++    Attributes
++    ----------
++    nodes : tuple of SkeletonNode
++        Graph nodes in deterministic order.
++    edges : tuple of SkeletonEdge
++        Graph edges in deterministic order.
++
++    Construction validates unique node IDs, known edge endpoints, and agreement
++    between edge geometry endpoints and their referenced nodes. Public geometry
++    uses ``(x, y) = (column, row)`` pixel coordinates. Graph collections are
++    tuples and the model is immutable.
++    """
++
+     nodes: tuple[SkeletonNode, ...]
+     edges: tuple[SkeletonEdge, ...]
+
+@@ -102,6 +155,7 @@ class SkeletonGraph:
+
+     @property
+     def component_count(self) -> int:
++        """Number of connected components in the graph, or zero for an empty graph."""
+         if not self.nodes:
+             return 0
+         adjacency = {node.id: set() for node in self.nodes}
+@@ -122,19 +176,46 @@ class SkeletonGraph:
+
+     @property
+     def cycle_count(self) -> int:
++        """Graph-level cyclomatic diagnostic, ``max(0, |E| - |V| + components)``.
++
++        This counts cycles in the whole graph. It is distinct from a route's
++        ``cycle_count`` and does not directly constrain route selection.
++        """
+         return max(0, len(self.edges) - len(self.nodes) + self.component_count)
+
+     @property
+     def endpoint_count(self) -> int:
++        """Number of graph nodes whose raster-topology degree is one."""
+         return sum(node.degree == 1 for node in self.nodes)
+
+     @property
+     def junction_count(self) -> int:
++        """Number of graph nodes whose raster-topology degree exceeds two."""
+         return sum(node.degree > 2 for node in self.nodes)
+
+
+ @dataclass(frozen=True)
+ class PathScore:
++    """Measured ranking values for one feasible route.
++
++    Attributes
++    ----------
++    guide_distance_px : float or None
++        Symmetric geometric distance to ``candidate_xy``, in pixels.
++    endpoint_order_error_px : float or None
++        Sum of ordered start/end guide endpoint distances, in pixels.
++    measured_confidence : float
++        Length-weighted route confidence in ``[0, 1]``. This is not a
++        probability that the route is correct.
++    length_error_px : float or None
++        Absolute error from ``expected_length_px``, in pixels.
++    turning_cost : float or None
++        Sampled mean squared turn angle, in squared radians.
++
++    A ``None`` score dimension was not applicable or requested; it does not
++    represent zero. The model is immutable.
++    """
++
+     guide_distance_px: float | None
+     endpoint_order_error_px: float | None
+     measured_confidence: float
+@@ -157,10 +238,33 @@ class PathScore:
+
+ @dataclass(frozen=True)
+ class PathRankingPolicy:
+-    """Configure ranking resolution, tie handling, and ambiguity evidence.
+-
+-    Turning cost remains a deterministic tie-breaker, but does not resolve
+-    ambiguity unless ``turning_cost_is_evidence`` is enabled.
++    """Configure route ranking, guide ties, and ambiguity evidence.
++
++    Attributes
++    ----------
++    guide_samples : int
++        Number of samples used for symmetric candidate-guide distance.
++    turning_samples : int
++        Number of samples used for mean squared turning cost.
++    guide_tie_tolerance_px : float
++        Direct numeric tolerance for grouping guide distances before endpoint
++        order and later ranking dimensions break ties. Distances are not rounded.
++    ambiguity_guide_distance_px : float
++        Maximum guide-distance difference considered overlapping evidence.
++    ambiguity_endpoint_order_px : float
++        Maximum endpoint-order error difference considered overlapping evidence.
++    ambiguity_confidence : float
++        Maximum measured-confidence difference considered overlapping evidence.
++    ambiguity_length_error_px : float
++        Maximum expected-length error difference considered overlapping evidence.
++    ambiguity_turning_cost : float
++        Maximum turning-cost difference considered overlapping when enabled.
++    turning_cost_is_evidence : bool
++        Whether turning-cost separation may reduce ambiguity. Turning cost is
++        otherwise a deterministic ranking tie-breaker only.
++
++    Guide tie tolerance controls ranking order and is separate from the
++    ambiguity tolerances. The model is immutable.
+     """
+
+     guide_samples: int = 64
+@@ -200,6 +304,19 @@ DEFAULT_RANKING_POLICY = PathRankingPolicy()
+
+ @dataclass(frozen=True)
+ class PathSearchLimits:
++    """Bounds for enumerating topology routes.
++
++    Attributes
++    ----------
++    max_paths : int
++        Maximum completed routes enumerated for each requested route kind.
++    max_states : int
++        Maximum search states expanded for each requested route kind.
++
++    Exceeding either limit raises ``PathSearchLimitError`` rather than returning
++    a partial result. The model is immutable.
++    """
++
+     max_paths: int = DEFAULT_MAX_PATHS
+     max_states: int = 100_000
+
+@@ -215,11 +332,27 @@ DEFAULT_SEARCH_LIMITS = PathSearchLimits()
+
+
+ class NoFeasiblePathError(ValueError):
+-    """Raised when no route satisfies the requested topology and constraints."""
++    """Raised when no route satisfies the requested kind and constraints.
++
++    ``select_path()`` raises this exception when no feasible route remains.
++    ``rank_paths()`` returns an empty tuple for the same absence of candidates.
++    """
+
+
+ class PathSearchLimitError(RuntimeError):
+-    """Raised when path or state search limits stop route enumeration."""
++    """Raised when route enumeration exceeds a configured search bound.
++
++    Attributes
++    ----------
++    path_kind : str
++        Route kind whose enumeration exceeded a limit.
++    limit_name : str
++        Search bound that was exceeded.
++    limit_value : int
++        Configured value of the exceeded bound.
++    observed : int
++        Number of paths or states observed at the point the limit was exceeded.
++    """
+
+     def __init__(
+         self,
+@@ -255,6 +388,31 @@ def _resolve_search_limits(
+
+ @dataclass(frozen=True)
+ class SkeletonPath:
++    """Frozen, ranked route geometry assembled from a topology route.
++
++    Attributes
++    ----------
++    xy : numpy.ndarray
++        Read-only polyline coordinates with shape ``(N, 2)`` in ``(x, y)``
++        pixel units.
++    edge_ids : tuple of int
++        Ordered graph edge IDs forming the route.
++    start_node, end_node : int
++        Node IDs defining this geometry's orientation for assembly and ranking.
++    length_px : float
++        Polyline length in pixels, consistent with ``xy``.
++    confidence : float
++        Length-weighted measured confidence in ``[0, 1]``, not a probability
++        that the route is correct.
++    cycle_count : int
++        Number of cycles in this route, not the whole graph.
++    score : PathScore
++        Measured ranking dimensions for this route.
++
++    Ambiguity belongs to ``PathSelection`` and is intentionally not stored on a
++    ``SkeletonPath``. The model is immutable.
++    """
++
+     xy: np.ndarray
+     edge_ids: tuple[int, ...]
+     start_node: int
+@@ -304,6 +462,25 @@ class SkeletonPath:
+
+ @dataclass(frozen=True)
+ class PathSelection:
++    """Selected path and selection-context ambiguity metadata.
++
++    Attributes
++    ----------
++    path : SkeletonPath
++        Highest-ranked feasible route materialized by the selection.
++    ambiguous : bool
++        Whether another different edge route has overlapping score evidence
++        under the configured ambiguity tolerances.
++    orientation_ambiguous : bool
++        Whether the reversed orientation of this same edge route remains
++        indistinguishable within endpoint-order evidence.
++    feasible_path_count : int
++        Number of scored alternatives satisfying the requested constraints.
++
++    Ambiguity flags describe this selection context and do not change the path's
++    measured confidence. The model is immutable.
++    """
++
+     path: SkeletonPath
+     ambiguous: bool
+     orientation_ambiguous: bool
+@@ -325,6 +502,23 @@ class PathSelection:
+
+ @dataclass(frozen=True)
+ class TopologyRoute:
++    """Topology-level route represented by a connected edge sequence.
++
++    Attributes
++    ----------
++    edge_ids : tuple of int
++        Unique graph edge IDs in traversal order.
++    start_node, end_node : int
++        Endpoint node IDs defining the sequence orientation. A loop has the same
++        start and end node.
++    cycle_count : int
++        Number of cycles in this route, independent of graph-level cycles.
++
++    The edge sequence is connected and has no repeated edge. Its orientation is
++    for topology traversal and geometry assembly, not physical drawing
++    direction. The model is immutable.
++    """
++
+     edge_ids: tuple[int, ...]
+     start_node: int
+     end_node: int
+@@ -358,6 +552,21 @@ class TopologyRoute:
+
+ @dataclass(frozen=True)
+ class TopologyPathInventory:
++    """Reusable route enumeration tied to one exact ``SkeletonGraph`` object.
++
++    Attributes
++    ----------
++    graph : SkeletonGraph
++        The graph instance used to prepare the inventory. Ranking requires that
++        same object.
++    paths_by_kind : collections.abc.Mapping
++        Immutable mapping from selectively prepared route kinds to tuples of
++        ``TopologyRoute`` objects.
++
++    Preparing only needed kinds avoids unnecessary enumeration. Stored route
++    edge sequences consume memory in exchange for reuse. The model is immutable.
++    """
++
+     graph: SkeletonGraph
+     paths_by_kind: Mapping[Literal["open", "loop", "open-with-loop"], tuple[TopologyRoute, ...]]
+
+diff --git a/skeletonpaths/ranking.py b/skeletonpaths/ranking.py
+index 91b533b..42c842f 100644
+--- a/skeletonpaths/ranking.py
++++ b/skeletonpaths/ranking.py
+@@ -274,7 +274,77 @@ def rank_paths(
+     max_paths: int | None = None,
+     limit: int | None = None,
+ ) -> tuple[SkeletonPath, ...]:
+-    """Rank feasible routes, optionally returning only the first ``limit`` paths."""
++    """Rank feasible topology routes and materialize ordered path geometries.
++
++    Parameters
++    ----------
++    graph : SkeletonGraph
++        Graph whose routes are searched or whose prepared inventory is ranked.
++    path_kind : str
++        Route kind to consider. ``"open"`` is endpoint-to-endpoint with zero
++        route-level cycles; ``"loop"`` is a closed cycle; ``"open-with-loop"``
++        is endpoint-to-endpoint with exactly one route-level cycle.
++    expected_cycles : int or None
++        Required cycle count of each route. This constrains routes, not the whole
++        graph.
++    expected_endpoints : tuple or None
++        Ordered ``(start, end)`` coordinate expectations in ``(x, y)`` pixel
++        units. Either endpoint may be ``None`` to leave it unconstrained.
++    endpoint_tolerance_px : float
++        Maximum distance in pixels from each specified expected endpoint. Must be
++        finite and nonnegative.
++    expected_length_px : float or None
++        Positive finite expected route length in pixels. When provided, length
++        error is ranking evidence; when omitted, shorter routes are not preferred.
++    candidate_xy : numpy.typing.ArrayLike or None
++        Optional guide polyline with shape ``(N, 2)``, at least two finite,
++        distinct ``(x, y)`` points. It guides ranking but is not a feasibility
++        constraint and does not imply physical direction.
++    path_inventory : TopologyPathInventory or None
++        Optional prepared routes. The inventory must belong to this exact graph
++        object and include ``path_kind``.
++    policy : PathRankingPolicy
++        Sampling, tie, and ambiguity-evidence policy.
++    limits : PathSearchLimits or None
++        Route enumeration bounds. Limits apply independently to each route kind.
++    max_paths : int or None
++        Legacy maximum routes per kind. Mutually exclusive with ``limits``.
++    limit : int or None
++        Positive maximum number of returned ``SkeletonPath`` objects. All
++        feasible candidates are still scored so ordering remains exact.
++
++    Returns
++    -------
++    tuple of SkeletonPath
++        Feasible routes in ranking order. Open routes may appear in both
++        orientations. Returns an empty tuple when no route remains feasible.
++
++    Raises
++    ------
++    ValueError
++        If a route kind, constraint, guide, inventory, or result limit is invalid.
++    TypeError
++        If ``policy`` or ``limits`` has an invalid type.
++    PathSearchLimitError
++        If route enumeration exceeds a configured bound. No partial result is
++        returned.
++
++    Notes
++    -----
++    Feasibility filtering precedes ranking. With ``candidate_xy``, symmetric
++    guide distance is primary; distances within ``guide_tie_tolerance_px`` are
++    grouped by direct numeric tolerance, then endpoint-order error, measured
++    confidence, expected-length error when present, turning cost, and deterministic
++    route identity break ties. Without a guide, measured confidence is primary,
++    followed by expected-length error when present, turning cost, and route
++    identity. Turning cost is normally only a tie-breaker. ``limit`` controls
++    materialized results, not route enumeration or scoring.
++
++    See Also
++    --------
++    select_path : Select the leading route with ambiguity metadata.
++    prepare_topology_paths : Prepare reusable route inventories.
++    """
+     if limit is not None:
+         if isinstance(limit, bool) or not isinstance(limit, (int, np.integer)) or limit < 1:
+             raise ValueError("limit must be a positive integer")
+@@ -299,7 +369,11 @@ def rank_paths(
+
+
+ def select_topology_path(*args, **kwargs) -> SkeletonPath:
+-    """Deprecated compatibility wrapper for :func:`select_path`."""
++    """Deprecated wrapper for :func:`select_path`, returning its ``SkeletonPath``.
++
++    Emits ``DeprecationWarning``. Use ``select_path()`` to obtain the selected
++    path together with ambiguity metadata.
++    """
+     warnings.warn(
+         "select_topology_path is deprecated; use select_path instead",
+         DeprecationWarning,
+@@ -322,7 +396,76 @@ def select_path(
+     limits: PathSearchLimits | None = None,
+     max_paths: int | None = None,
+ ) -> PathSelection:
+-    """Select the highest-ranked feasible route with its ambiguity metadata."""
++    """Select the highest-ranked feasible route and report selection ambiguity.
++
++    Parameters
++    ----------
++    graph : SkeletonGraph
++        Graph whose routes are searched or whose prepared inventory is selected.
++    path_kind : str
++        Route kind to consider. ``"open"`` is endpoint-to-endpoint with zero
++        route-level cycles; ``"loop"`` is a closed cycle; ``"open-with-loop"``
++        is endpoint-to-endpoint with exactly one route-level cycle.
++    expected_cycles : int or None
++        Required cycle count of each route. This constrains routes, not the whole
++        graph.
++    expected_endpoints : tuple or None
++        Ordered ``(start, end)`` coordinate expectations in ``(x, y)`` pixel
++        units. Either endpoint may be ``None`` to leave it unconstrained.
++    endpoint_tolerance_px : float
++        Maximum distance in pixels from each specified expected endpoint. Must be
++        finite and nonnegative.
++    expected_length_px : float or None
++        Positive finite expected route length in pixels. When provided, length
++        error is ranking evidence; when omitted, shorter routes are not preferred.
++    candidate_xy : numpy.typing.ArrayLike or None
++        Optional guide polyline with shape ``(N, 2)``, at least two finite,
++        distinct ``(x, y)`` points. It guides ranking but is not a feasibility
++        constraint and does not imply physical direction.
++    path_inventory : TopologyPathInventory or None
++        Optional prepared routes. The inventory must belong to this exact graph
++        object and include ``path_kind``.
++    policy : PathRankingPolicy
++        Sampling, tie, and ambiguity-evidence policy.
++    limits : PathSearchLimits or None
++        Route enumeration bounds. Limits apply independently to each route kind.
++    max_paths : int or None
++        Legacy maximum routes per kind. Mutually exclusive with ``limits``.
++
++    Returns
++    -------
++    PathSelection
++        Selected ``path``, route and orientation ambiguity flags, and the count of
++        feasible scored routes. Only the selected ``SkeletonPath`` is materialized.
++
++    Raises
++    ------
++    NoFeasiblePathError
++        If no route satisfies the requested kind and hard feasibility constraints.
++    ValueError
++        If a route kind, constraint, guide, or inventory is invalid.
++    TypeError
++        If ``policy`` or ``limits`` has an invalid type.
++    PathSearchLimitError
++        If route enumeration exceeds a configured bound. No partial result is
++        returned.
++
++    Notes
++    -----
++    Feasibility filtering precedes ranking, and all feasible alternatives are
++    scored because they may affect ambiguity. ``ambiguous`` means another
++    different edge route has overlapping score evidence. ``orientation_ambiguous``
++    means the reversed orientation of the selected edge route remains
++    indistinguishable within endpoint-order evidence. Neither flag changes
++    measured confidence. Candidate geometry guides ranking and orientation; it
++    does not establish physical direction. See ``rank_paths()`` for ranking order
++    and parameter semantics.
++
++    See Also
++    --------
++    rank_paths : Return ranked path objects instead of one selection.
++    prepare_topology_paths : Prepare reusable route inventories.
++    """
+     scored = _rank_candidates(
+         graph,
+         path_kind=path_kind,
+@@ -374,7 +517,10 @@ def select_path(
+
+
+ def rank_topology_paths(*args, **kwargs) -> tuple[SkeletonPath, ...]:
+-    """Deprecated compatibility wrapper for :func:`rank_paths`."""
++    """Deprecated wrapper for :func:`rank_paths`, returning ranked path objects.
++
++    Emits ``DeprecationWarning``. Use ``rank_paths()`` instead.
++    """
+     warnings.warn(
+         "rank_topology_paths is deprecated; use rank_paths instead",
+         DeprecationWarning,
+diff --git a/skeletonpaths/routing.py b/skeletonpaths/routing.py
+index 02ac67a..10e23d8 100644
+--- a/skeletonpaths/routing.py
++++ b/skeletonpaths/routing.py
+@@ -169,10 +169,46 @@ def prepare_topology_paths(
+     limits: PathSearchLimits | None = None,
+     max_paths: int | None = None,
+ ) -> TopologyPathInventory:
+-    """Enumerate selected route kinds once, bounded by ``limits``.
+-
+-    Search limits apply independently to each requested route kind. The legacy
+-    ``max_paths`` argument remains available when no ``limits`` object is given.
++    """Enumerate selected route kinds once for reuse during ranking.
++
++    Parameters
++    ----------
++    graph : SkeletonGraph
++        Graph whose routes are enumerated. The returned inventory belongs to
++        this exact graph object.
++    path_kinds : tuple of str
++        Supported entries are ``"open"``, ``"loop"``, and ``"open-with-loop"``.
++        The default prepares all three kinds.
++        Duplicates and unsupported kinds are invalid; an empty tuple prepares no
++        routes.
++    limits : PathSearchLimits or None
++        Per-route-kind bounds for completed routes and expanded search states.
++    max_paths : int or None
++        Legacy maximum completed routes per route kind. Mutually exclusive with
++        ``limits``.
++
++    Returns
++    -------
++    TopologyPathInventory
++        Inventory containing immutable route tuples keyed by the requested kinds.
++
++    Raises
++    ------
++    TypeError
++        If ``limits`` is not a ``PathSearchLimits`` instance.
++    ValueError
++        If route kinds are unsupported or duplicated, or both ``limits`` and
++        ``max_paths`` are supplied.
++    PathSearchLimitError
++        If enumeration exceeds a configured path or state limit. No partial
++        inventory is returned.
++
++    Notes
++    -----
++    Search limits apply independently to each requested route kind. Selective
++    inventories avoid enumerating kinds that will not be ranked. Stored edge
++    sequences trade memory and initial enumeration cost for reuse across
++    repeated ranking or selection calls.
+     """
+     limits = _resolve_search_limits(limits, max_paths)
+     kinds = tuple(path_kinds)

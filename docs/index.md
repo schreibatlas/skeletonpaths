@@ -30,6 +30,7 @@ The selected route is an oriented geometry assembled from an undirected topology
 
 getting-started
 examples
+changelog
 guide/graph-construction
 guide/path-selection
 guide/ambiguity-and-ranking
@@ -39,4 +40,4 @@ reference/behavior-contracts
 reference/api
 ```
 
-Start with the {doc}`getting-started` guide. The conceptual guides explain {doc}`guide/graph-construction`, {doc}`guide/path-selection`, {doc}`guide/ambiguity-and-ranking`, and {doc}`guide/search-limits`. See the {doc}`reference/behavior-contracts` and {doc}`reference/api` for exact guarantees and the supported package-root API.
+Start with the {doc}`getting-started` guide. The conceptual guides explain {doc}`guide/graph-construction`, {doc}`guide/path-selection`, {doc}`guide/ambiguity-and-ranking`, and {doc}`guide/search-limits`. See the {doc}`reference/behavior-contracts` and {doc}`reference/api` for exact guarantees and the supported package-root API. See the {doc}`changelog` for release history.
