@@ -1,6 +1,6 @@
 # Graph construction
 
-SkeletonPaths turns a binary raster into an undirected topology graph. Raster indexing and public geometry use different conventions: arrays use `[row, column]`, while {class}`skeletonpaths.SkeletonNode` and {class}`skeletonpaths.SkeletonEdge` geometry, and later path coordinates, use `(x, y) = (column, row)` in pixel units.
+SkeletonPaths turns a binary raster into an undirected topology graph. Graph edges are evidence of raster connectivity, not directed strokes; their deterministic storage order is for geometry assembly and is not physical drawing order. Raster arrays use `[row, column]`, while {class}`skeletonpaths.SkeletonNode` and {class}`skeletonpaths.SkeletonEdge` geometry and later route coordinates use `(x, y) = (column, row)` in pixel units.
 
 ## Accepted binary images
 
@@ -17,16 +17,18 @@ Values are not interpreted as foreground merely because they are nonzero.
 
 ## Mask versus pre-thinned skeleton
 
-| Behavior | {func}`skeletonpaths.graph_from_skeleton` | {func}`skeletonpaths.graph_from_mask` |
+| Behavior | {func}`skeletonpaths.graph_from_skeleton` | {func}`skeletonpaths.graph_from_mask` / {func}`skeletonpaths.analyze_mask` |
 | --- | --- | --- |
 | Input already thinned | Yes | No |
 | Skeletonization | No | Yes |
 | Automatic radius | No. Radius is zero if absent. | Yes. Uses a Euclidean distance transform if absent. |
 | Component filtering | No | Optional `min_component_area`, before skeletonization |
 | Image extra | Not required | Required for mask processing |
+For {func}`skeletonpaths.graph_from_mask`, component filtering labels 8-neighbor mask components and removes components smaller than the requested area. The default `min_component_area=0` keeps every component. SciPy is needed to derive radius for a nonempty mask or when filtering is enabled. scikit-image is needed to skeletonize. Imports are lazy. Supplying a radius map avoids automatic radius derivation, but does not remove the skeletonization dependency.
 
-For {func}`skeletonpaths.graph_from_mask`, component filtering labels 8-neighbor mask components and removes components smaller than the requested area. The default `min_component_area=0` keeps every component. SciPy is needed when automatic radius is requested or filtering is enabled. scikit-image is needed to skeletonize. Imports are lazy. Supplying a radius map avoids automatic radius derivation, but does not remove the skeletonization dependency.
 
+
+`analyze_mask()` applies the same processing and returns a frozen `SkeletonAnalysis` containing owned read-only copies of the normalized mask, skeleton, radius, and confidence arrays, together with the graph. `graph_from_mask()` is the graph-only shortcut. Empty masks produce an empty graph and skeleton with a zero radius map.
 {func}`skeletonpaths.graph_from_skeleton` assumes the input is already thinned. It does not infer radius from surrounding ink and can run without SciPy or scikit-image. {func}`skeletonpaths.build_skeleton_graph` is the lower-level constructor. With `already_skeleton=False` it skeletonizes and lazily imports scikit-image; with `already_skeleton=True` it uses the pixels directly. It does not derive a distance-transform radius.
 
 ## Pixel adjacency
@@ -41,7 +43,10 @@ Orthogonal foreground neighbors connect. A diagonal pair connects only when neit
 - Adjacent junction pixels remain separate nodes.
 - Edge length is the assembled polyline length in pixels.
 
-Edge geometry is ordered from endpoint node `a` to endpoint node `b`. This ordering supports geometry assembly and ranking; it does not imply physical drawing direction.
+Edge geometry is stored from endpoint node `a` to node `b`. This deterministic storage orientation supports geometry assembly and ranking; it does not imply physical drawing direction or traversal order.
+
+
+`SkeletonPath` represents a connected candidate route with unique edge IDs. `SkeletonWalk` is separate and may repeat edge IDs in its ordered traversal. `covering_walk()` provides a deterministic connected traversal hypothesis and raises `DisconnectedGraphError` for disconnected graphs.
 
 ## Spur pruning
 
@@ -61,11 +66,16 @@ A supplied `radius` map must match the image shape, contain finite values, and b
 - An edge's mean radius and confidence are means over its edge-chain pixels.
 - A path's measured confidence is the edge-length-weighted mean of its edge confidences.
 
-When no confidence map is supplied, confidence defaults to one. When no radius map is supplied to the pre-thinned entry point, radius defaults to zero. Mask input instead derives radius automatically unless a radius map is provided.
+When no confidence map is supplied, analysis returns an all-ones confidence map as generic foreground evidence, not a probability of route correctness. Graph nodes and edges therefore receive confidence one by default. When no radius map is supplied to the pre-thinned entry point, radius defaults to zero. Mask input derives radius automatically unless a radius map is provided.
 
 The mask and confidence example is maintained in `examples/` and included here without copying its source:
 
 ```{literalinclude} ../../examples/05_mask_radius_confidence.py
+:language: python
+```
+
+
+```{literalinclude} ../../examples/09_analyze_mask.py
 :language: python
 ```
 

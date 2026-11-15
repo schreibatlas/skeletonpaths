@@ -25,12 +25,13 @@ skeleton = np.zeros((5, 7), dtype=bool)
 skeleton[2, 1:6] = True
 graph = skeletonpaths.graph_from_skeleton(skeleton)
 assert graph.endpoint_count == 2
-try:
-    skeletonpaths.graph_from_mask(skeleton)
-except ImportError as error:
-    assert "skeletonpaths[image]" in str(error)
-else:
-    raise AssertionError("graph_from_mask unexpectedly worked without image dependencies")
+for analyze in (skeletonpaths.analyze_mask, skeletonpaths.graph_from_mask):
+    try:
+        analyze(skeleton)
+    except ImportError as error:
+        assert "skeletonpaths[image]" in str(error)
+    else:
+        raise AssertionError(f"{analyze.__name__} unexpectedly worked without image dependencies")
 """
     result = subprocess.run(
         [sys.executable, "-c", script],

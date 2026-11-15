@@ -35,6 +35,67 @@ class _ScoredRoute:
     score: PathScore
 
 
+def _normalized_tangents(
+    tangents: tuple[Point | None, Point | None] | None,
+) -> tuple[np.ndarray | None, np.ndarray | None] | None:
+    if tangents is None:
+        return None
+    if len(tangents) != 2:
+        raise ValueError("expected endpoint tangents must contain two xy vectors or None")
+    normalized = []
+    for tangent in tangents:
+        if tangent is None:
+            normalized.append(None)
+            continue
+        vector = np.asarray(tangent, dtype=float)
+        if vector.shape != (2,) or not np.isfinite(vector).all():
+            raise ValueError("expected endpoint tangents must be finite xy vectors")
+        magnitude = float(np.linalg.norm(vector))
+        if magnitude <= 1e-12:
+            raise ValueError("expected endpoint tangents must be nonzero vectors")
+        normalized.append(vector / magnitude)
+    return normalized[0], normalized[1]
+
+
+def _first_tangent(xy: np.ndarray) -> np.ndarray | None:
+    if len(xy) < 2:
+        return None
+    distances = np.linalg.norm(np.diff(xy, axis=0), axis=1)
+    total_length = float(distances.sum())
+    if total_length <= 1e-12:
+        return None
+    target_distance = min(2.0, total_length / 2.0)
+    sample_distances = np.concatenate(([0.0], np.cumsum(distances)))
+    sample_index = min(int(np.searchsorted(sample_distances, target_distance)), len(xy) - 1)
+    vector = xy[sample_index] - xy[0]
+    magnitude = float(np.linalg.norm(vector))
+    return vector / magnitude if magnitude > 1e-12 else None
+
+
+def _endpoint_tangent_errors(
+    xy: np.ndarray,
+    expected: tuple[np.ndarray | None, np.ndarray | None] | None,
+) -> tuple[float | None, float | None]:
+    if expected is None:
+        return None, None
+    actual = (_first_tangent(xy), None)
+    end_reverse_tangent = _first_tangent(xy[::-1])
+    actual = (actual[0], -end_reverse_tangent if end_reverse_tangent is not None else None)
+    errors = []
+    for expected_tangent, actual_tangent in zip(expected, actual, strict=True):
+        if expected_tangent is None or actual_tangent is None:
+            errors.append(None)
+            continue
+        cosine = float(np.clip(np.dot(expected_tangent, actual_tangent), -1.0, 1.0))
+        errors.append(float(np.degrees(np.arccos(cosine))))
+    return errors[0], errors[1]
+
+
+def _mean_tangent_error(errors: tuple[float | None, float | None]) -> float | None:
+    measured = [error for error in errors if error is not None]
+    return float(np.mean(measured)) if measured else None
+
+
 def _score_landscapes_overlap(
     first: PathScore, second: PathScore, policy: PathRankingPolicy
 ) -> bool:
@@ -57,6 +118,14 @@ def _score_landscapes_overlap(
             and abs(first_value - second_value) > tolerance
         ):
             return False
+    if (
+        policy.tangent_error_is_evidence
+        and first.endpoint_tangent_error_deg is not None
+        and second.endpoint_tangent_error_deg is not None
+        and abs(first.endpoint_tangent_error_deg - second.endpoint_tangent_error_deg)
+        > policy.ambiguity_endpoint_tangent_deg
+    ):
+        return False
     if abs(first.measured_confidence - second.measured_confidence) > policy.ambiguity_confidence:
         return False
     return not (
@@ -73,7 +142,9 @@ def _rank_candidates(
     path_kind: Literal["open", "loop", "open-with-loop"] = "open",
     expected_cycles: int | None = None,
     expected_endpoints: tuple[Point | None, Point | None] | None = None,
+    expected_endpoint_tangents: tuple[Point | None, Point | None] | None = None,
     endpoint_tolerance_px: float = 3.0,
+    tangent_tolerance_deg: float = 35.0,
     expected_length_px: float | None = None,
     candidate_xy: ArrayLike | None = None,
     path_inventory: TopologyPathInventory | None = None,
@@ -102,6 +173,9 @@ def _rank_candidates(
         raise ValueError("expected cycle count must be a nonnegative integer")
     if not np.isfinite(endpoint_tolerance_px) or endpoint_tolerance_px < 0.0:
         raise ValueError("endpoint tolerance must be finite and nonnegative")
+    if not np.isfinite(tangent_tolerance_deg) or not 0.0 <= tangent_tolerance_deg <= 180.0:
+        raise ValueError("tangent tolerance must be finite and between zero and 180 degrees")
+    expected_tangents = _normalized_tangents(expected_endpoint_tangents)
     if expected_length_px is not None and (
         not np.isfinite(expected_length_px) or expected_length_px <= 0.0
     ):
@@ -167,6 +241,15 @@ def _rank_candidates(
         xy, routed_end = _edge_route(graph, edge_ids, start)
         if routed_end != end:
             continue
+        tangent_errors = _endpoint_tangent_errors(xy, expected_tangents)
+        tangent_error = _mean_tangent_error(tangent_errors)
+        if policy.endpoint_tangents_are_hard and any(
+            expected is not None and (error is None or error > tangent_tolerance_deg)
+            for expected, error in zip(
+                expected_tangents or (None, None), tangent_errors, strict=True
+            )
+        ):
+            continue
         length = float(sum(graph.edges[edge_id].length_px for edge_id in edge_ids))
         confidence = float(
             np.average(
@@ -192,16 +275,22 @@ def _rank_candidates(
                 abs(length - expected_length_px) if expected_length_px is not None else None
             ),
             turning_cost=mean_squared_turn_angle(xy, samples=policy.turning_samples),
+            endpoint_tangent_error_deg=tangent_error,
         )
         scored.append(_ScoredRoute(route, length, score))
 
     def tie_break_key(
         item: _ScoredRoute,
-    ) -> tuple[float, float, float, float, tuple[int, ...], int, int]:
+    ) -> tuple[float, float, float, float, float, tuple[int, ...], int, int]:
         route = item.route
         score = item.score
         return (
             score.endpoint_order_error_px if score.endpoint_order_error_px is not None else 0.0,
+            (
+                score.endpoint_tangent_error_deg
+                if policy.tangent_error_is_evidence and score.endpoint_tangent_error_deg is not None
+                else 0.0
+            ),
             -score.measured_confidence,
             score.length_error_px if score.length_error_px is not None else 0.0,
             score.turning_cost if score.turning_cost is not None else 0.0,
@@ -213,6 +302,12 @@ def _rank_candidates(
     if candidate is None:
         scored.sort(
             key=lambda item: (
+                (
+                    item.score.endpoint_tangent_error_deg
+                    if policy.tangent_error_is_evidence
+                    and item.score.endpoint_tangent_error_deg is not None
+                    else 0.0
+                ),
                 -item.score.measured_confidence,
                 item.score.length_error_px if item.score.length_error_px is not None else 0.0,
                 item.score.turning_cost if item.score.turning_cost is not None else 0.0,
@@ -265,7 +360,9 @@ def rank_paths(
     path_kind: Literal["open", "loop", "open-with-loop"] = "open",
     expected_cycles: int | None = None,
     expected_endpoints: tuple[Point | None, Point | None] | None = None,
+    expected_endpoint_tangents: tuple[Point | None, Point | None] | None = None,
     endpoint_tolerance_px: float = 3.0,
+    tangent_tolerance_deg: float = 35.0,
     expected_length_px: float | None = None,
     candidate_xy: ArrayLike | None = None,
     path_inventory: TopologyPathInventory | None = None,
@@ -293,6 +390,11 @@ def rank_paths(
     endpoint_tolerance_px : float
         Maximum distance in pixels from each specified expected endpoint. Must be
         finite and nonnegative.
+    expected_endpoint_tangents : tuple or None
+        Ordered start and end tangent vectors in xy coordinates. Either may be None.
+    tangent_tolerance_deg : float
+        Maximum angular error for hard tangent constraints, in degrees. It must be
+        between zero and 180 degrees and is used only when the policy enables hard constraints.
     expected_length_px : float or None
         Positive finite expected route length in pixels. When provided, length
         error is ranking evidence; when omitted, shorter routes are not preferred.
@@ -333,11 +435,14 @@ def rank_paths(
     -----
     Feasibility filtering precedes ranking. With ``candidate_xy``, symmetric
     guide distance is primary; distances within ``guide_tie_tolerance_px`` are
-    grouped by direct numeric tolerance, then endpoint-order error, measured
-    confidence, expected-length error when present, turning cost, and deterministic
-    route identity break ties. Without a guide, measured confidence is primary,
-    followed by expected-length error when present, turning cost, and route
-    identity. Turning cost is normally only a tie-breaker. ``limit`` controls
+    grouped by direct numeric tolerance, then endpoint-order error, tangent error
+    when enabled by policy, measured confidence, expected-length error when present,
+    turning cost, and deterministic route identity break ties. Without a guide,
+    tangent error is considered before measured confidence when enabled, followed
+    by expected-length error, turning cost, and route identity. Tangent evidence is
+    ranking evidence by default; ``endpoint_tangents_are_hard`` opts into filtering
+    routes outside ``tangent_tolerance_deg``. Tangents use samples separated by up
+    to two pixels. Turning cost is normally only a tie-breaker. ``limit`` controls
     materialized results, not route enumeration or scoring.
 
     See Also
@@ -355,7 +460,9 @@ def rank_paths(
         path_kind=path_kind,
         expected_cycles=expected_cycles,
         expected_endpoints=expected_endpoints,
+        expected_endpoint_tangents=expected_endpoint_tangents,
         endpoint_tolerance_px=endpoint_tolerance_px,
+        tangent_tolerance_deg=tangent_tolerance_deg,
         expected_length_px=expected_length_px,
         candidate_xy=candidate_xy,
         path_inventory=path_inventory,
@@ -388,7 +495,9 @@ def select_path(
     path_kind: Literal["open", "loop", "open-with-loop"] = "open",
     expected_cycles: int | None = None,
     expected_endpoints: tuple[Point | None, Point | None] | None = None,
+    expected_endpoint_tangents: tuple[Point | None, Point | None] | None = None,
     endpoint_tolerance_px: float = 3.0,
+    tangent_tolerance_deg: float = 35.0,
     expected_length_px: float | None = None,
     candidate_xy: ArrayLike | None = None,
     path_inventory: TopologyPathInventory | None = None,
@@ -415,6 +524,11 @@ def select_path(
     endpoint_tolerance_px : float
         Maximum distance in pixels from each specified expected endpoint. Must be
         finite and nonnegative.
+    expected_endpoint_tangents : tuple or None
+        Ordered start and end tangent vectors in xy coordinates. Either may be None.
+    tangent_tolerance_deg : float
+        Maximum angular error for hard tangent constraints, in degrees, between zero
+        and 180 degrees.
     expected_length_px : float or None
         Positive finite expected route length in pixels. When provided, length
         error is ranking evidence; when omitted, shorter routes are not preferred.
@@ -456,10 +570,10 @@ def select_path(
     scored because they may affect ambiguity. ``ambiguous`` means another
     different edge route has overlapping score evidence. ``orientation_ambiguous``
     means the reversed orientation of the selected edge route remains
-    indistinguishable within endpoint-order evidence. Neither flag changes
-    measured confidence. Candidate geometry guides ranking and orientation; it
-    does not establish physical direction. See ``rank_paths()`` for ranking order
-    and parameter semantics.
+    indistinguishable within endpoint-order and enabled tangent evidence. Neither
+    flag changes measured confidence. Candidate geometry and tangent constraints
+    guide ranking and orientation but do not establish physical direction. See
+    ``rank_paths()`` for ranking order and parameter semantics.
 
     See Also
     --------
@@ -471,7 +585,9 @@ def select_path(
         path_kind=path_kind,
         expected_cycles=expected_cycles,
         expected_endpoints=expected_endpoints,
+        expected_endpoint_tangents=expected_endpoint_tangents,
         endpoint_tolerance_px=endpoint_tolerance_px,
+        tangent_tolerance_deg=tangent_tolerance_deg,
         expected_length_px=expected_length_px,
         candidate_xy=candidate_xy,
         path_inventory=path_inventory,
@@ -502,14 +618,25 @@ def select_path(
         xy, routed_end = _edge_route(graph, route.edge_ids, route.start_node)
         if routed_end != selected.start_node or not np.allclose(xy, selected.xy[::-1]):
             continue
-        if (
+        endpoint_order_overlap = (
             selected_record.score.endpoint_order_error_px is None
             or record.score.endpoint_order_error_px is None
             or abs(
                 selected_record.score.endpoint_order_error_px - record.score.endpoint_order_error_px
             )
             <= policy.ambiguity_endpoint_order_px
-        ):
+        )
+        tangent_overlap = (
+            not policy.tangent_error_is_evidence
+            or selected_record.score.endpoint_tangent_error_deg is None
+            or record.score.endpoint_tangent_error_deg is None
+            or abs(
+                selected_record.score.endpoint_tangent_error_deg
+                - record.score.endpoint_tangent_error_deg
+            )
+            <= policy.ambiguity_endpoint_tangent_deg
+        )
+        if endpoint_order_overlap and tangent_overlap:
             orientation_ambiguous = True
             break
 

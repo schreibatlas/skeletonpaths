@@ -41,7 +41,10 @@ napoleon_attr_annotations = True
 autodoc_member_order = "bysource"
 autodoc_typehints = "description"
 nitpicky = True
-nitpick_ignore = [("py:class", "numpy.typing.ArrayLike")]
+nitpick_ignore = [
+    ("py:class", "numpy.typing.ArrayLike"),
+    ("py:class", "numpy._typing._array_like.ArrayLike"),
+]
 
 exclude_patterns = ["_build", "Thumbs.db", ".DS_Store", "README.md"]
 

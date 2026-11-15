@@ -1,19 +1,21 @@
+from __future__ import annotations
+
 import numpy as np
 from numpy.typing import ArrayLike
 
-from .graph import _binary_image, build_skeleton_graph
-from .model import SkeletonGraph
+from .graph import _binary_image, graph_from_skeleton, prune_spurs
+from .model import SkeletonAnalysis, SkeletonGraph
 
 
-def graph_from_mask(
+def analyze_mask(
     mask: ArrayLike,
     *,
     min_spur_length: float = 0.0,
     radius: ArrayLike | None = None,
     confidence: ArrayLike | None = None,
     min_component_area: int = 0,
-) -> SkeletonGraph:
-    """Skeletonize a binary mask and build its topology graph.
+) -> SkeletonAnalysis:
+    """Skeletonize a binary mask and return its raster data and topology.
 
     Parameters
     ----------
@@ -25,19 +27,19 @@ def graph_from_mask(
         threshold, in pixels. Zero preserves all spurs.
     radius : numpy.typing.ArrayLike or None
         Optional finite, nonnegative radius map matching ``mask``. If omitted,
-        derive radius from the mask with a Euclidean distance transform.
+        derive radius from the foreground with a Euclidean distance transform.
     confidence : numpy.typing.ArrayLike or None
         Optional finite confidence map matching ``mask`` with values in
-        ``[0, 1]``. If omitted, confidence values are one.
+        ``[0, 1]``. If omitted, the analysis confidence map is all ones.
+        These values are generic evidence, not a probability.
     min_component_area : int
         Remove 8-neighbor mask components smaller than this pixel area before
         skeletonization. Zero keeps every component.
 
     Returns
     -------
-    SkeletonGraph
-        Immutable topology graph with public coordinates in ``(x, y) =
-        (column, row)`` pixel units.
+    SkeletonAnalysis
+        Owned read-only mask, skeleton, radius, and confidence arrays alongside the topology graph.
 
     Raises
     ------
@@ -50,17 +52,10 @@ def graph_from_mask(
     Notes
     -----
     Component filtering occurs before skeletonization and uses 8-neighbor
-    component labeling. SciPy is required when ``radius`` is omitted and when
-    ``min_component_area`` is positive. Skeletonization requires scikit-image.
-    These dependencies are imported lazily. Use ``graph_from_skeleton()`` for
-    pre-thinned input without image-processing dependencies.
-
-    See Also
-    --------
-    graph_from_skeleton : Build a graph from an already-thinned skeleton.
-    build_skeleton_graph : Lower-level graph constructor.
+    component labeling. SciPy is required when radius is omitted for nonempty
+    masks and when ``min_component_area`` is positive. Skeletonization requires
+    scikit-image. These dependencies are imported lazily.
     """
-
     source = _binary_image(mask, name="mask")
     if (
         isinstance(min_component_area, bool)
@@ -80,18 +75,72 @@ def graph_from_mask(
         keep = areas >= min_component_area
         keep[0] = False
         source = keep[labels]
+
+    radius_map: np.ndarray
     if radius is None:
-        try:
-            from scipy.ndimage import distance_transform_edt
-        except ImportError as error:
-            raise ImportError(
-                "automatic mask radius requires SciPy; install skeletonpaths[image]"
-            ) from error
-        radius = distance_transform_edt(source)
-    return build_skeleton_graph(
-        source,
-        min_spur_length_px=min_spur_length,
+        if source.any():
+            try:
+                from scipy.ndimage import distance_transform_edt
+            except ImportError as error:
+                raise ImportError(
+                    "automatic mask radius requires SciPy; install skeletonpaths[image]"
+                ) from error
+            radius_map = distance_transform_edt(source)
+        else:
+            radius_map = np.zeros(source.shape, dtype=float)
+    else:
+        radius_map = np.asarray(radius, dtype=float)
+        if (
+            radius_map.shape != source.shape
+            or not np.isfinite(radius_map).all()
+            or np.any(radius_map < 0.0)
+        ):
+            raise ValueError("radius map must be finite, nonnegative, and match observed ink")
+
+    if confidence is None:
+        confidence_map = np.ones(source.shape, dtype=float)
+    else:
+        confidence_map = np.asarray(confidence, dtype=float)
+        if (
+            confidence_map.shape != source.shape
+            or not np.isfinite(confidence_map).all()
+            or np.any((confidence_map < 0.0) | (confidence_map > 1.0))
+        ):
+            raise ValueError("confidence map must be between zero and one and match observed ink")
+
+    try:
+        from skimage.morphology import skeletonize
+    except ImportError as error:
+        raise ImportError(
+            "skeletonizing observed ink requires scikit-image; install skeletonpaths[image]"
+        ) from error
+    skeleton = prune_spurs(skeletonize(source), min_spur_length)
+    graph = graph_from_skeleton(skeleton, radius=radius_map, confidence=confidence_map)
+    return SkeletonAnalysis(
+        mask=source,
+        skeleton=skeleton,
+        radius=radius_map,
+        confidence=confidence_map,
+        graph=graph,
+    )
+
+
+def graph_from_mask(
+    mask: ArrayLike,
+    *,
+    min_spur_length: float = 0.0,
+    radius: ArrayLike | None = None,
+    confidence: ArrayLike | None = None,
+    min_component_area: int = 0,
+) -> SkeletonGraph:
+    """Skeletonize a binary mask and build its topology graph.
+
+    Use :func:`analyze_mask` when the skeleton and radius arrays are also needed.
+    """
+    return analyze_mask(
+        mask,
+        min_spur_length=min_spur_length,
         radius=radius,
         confidence=confidence,
-        already_skeleton=False,
-    )
+        min_component_area=min_component_area,
+    ).graph

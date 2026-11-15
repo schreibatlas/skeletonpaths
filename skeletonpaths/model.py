@@ -195,6 +195,244 @@ class SkeletonGraph:
 
 
 @dataclass(frozen=True)
+class SkeletonImage:
+    """Compatibility base model for skeleton, radius, and topology results.
+
+    :class:`SkeletonAnalysis` extends this model with the analyzed mask and
+    confidence arrays and is returned by :func:`analyze_mask`.
+    """
+
+    skeleton: np.ndarray
+    radius: np.ndarray
+    graph: SkeletonGraph
+
+    def __post_init__(self) -> None:
+        skeleton = np.asarray(self.skeleton)
+        if skeleton.ndim != 2:
+            raise ValueError("skeleton must be a two-dimensional binary image")
+        if not np.issubdtype(skeleton.dtype, np.bool_) and (
+            not np.issubdtype(skeleton.dtype, np.number)
+            or not np.isfinite(skeleton).all()
+            or np.any((skeleton != 0) & (skeleton != 1))
+        ):
+            raise ValueError("skeleton must be a two-dimensional binary image")
+        skeleton = np.array(skeleton, dtype=bool, copy=True)
+        radius = np.asarray(self.radius, dtype=float)
+        if radius.shape != skeleton.shape or not np.isfinite(radius).all() or np.any(radius < 0.0):
+            raise ValueError("radius must be finite, nonnegative, and match the skeleton")
+        if not isinstance(self.graph, SkeletonGraph):
+            raise TypeError("graph must be a SkeletonGraph")
+        radius = np.array(radius, copy=True)
+        skeleton.setflags(write=False)
+        radius.setflags(write=False)
+        object.__setattr__(self, "skeleton", skeleton)
+        object.__setattr__(self, "radius", radius)
+
+
+@dataclass(frozen=True, init=False)
+class SkeletonAnalysis(SkeletonImage):
+    """Immutable result of analyzing a binary mask.
+
+    ``mask``, ``skeleton``, ``radius``, and ``confidence`` are owned read-only
+    arrays. Confidence is generic foreground evidence, not a probability that
+    any graph route or traversal is correct.
+    """
+
+    mask: np.ndarray
+    confidence: np.ndarray
+
+    def __init__(
+        self,
+        mask: np.ndarray,
+        skeleton: np.ndarray,
+        radius: np.ndarray,
+        confidence: np.ndarray,
+        graph: SkeletonGraph,
+    ) -> None:
+        object.__setattr__(self, "mask", mask)
+        object.__setattr__(self, "skeleton", skeleton)
+        object.__setattr__(self, "radius", radius)
+        object.__setattr__(self, "confidence", confidence)
+        object.__setattr__(self, "graph", graph)
+        self.__post_init__()
+
+    def __post_init__(self) -> None:
+        SkeletonImage.__post_init__(self)
+        mask = np.asarray(self.mask)
+        if mask.ndim != 2 or mask.shape != self.skeleton.shape:
+            raise ValueError("mask must be two-dimensional and match the skeleton")
+        if not np.issubdtype(mask.dtype, np.bool_) and (
+            not np.issubdtype(mask.dtype, np.number)
+            or not np.isfinite(mask).all()
+            or np.any((mask != 0) & (mask != 1))
+        ):
+            raise ValueError("mask must be a two-dimensional binary image")
+        confidence = np.asarray(self.confidence, dtype=float)
+        if (
+            confidence.shape != mask.shape
+            or not np.isfinite(confidence).all()
+            or np.any((confidence < 0.0) | (confidence > 1.0))
+        ):
+            raise ValueError("confidence must be finite, between zero and one, and match the mask")
+        mask = np.array(mask, dtype=bool, copy=True)
+        confidence = np.array(confidence, dtype=float, copy=True)
+        mask.setflags(write=False)
+        confidence.setflags(write=False)
+        object.__setattr__(self, "mask", mask)
+        object.__setattr__(self, "confidence", confidence)
+
+    @property
+    def component_count(self) -> int:
+        return self.graph.component_count
+
+    @property
+    def endpoint_count(self) -> int:
+        return self.graph.endpoint_count
+
+    @property
+    def junction_count(self) -> int:
+        return self.graph.junction_count
+
+    @property
+    def cycle_count(self) -> int:
+        return self.graph.cycle_count
+
+
+@dataclass(frozen=True)
+class SkeletonWalk:
+    """Immutable ordered traversal that may repeat graph edges.
+
+    Coordinates, edge IDs, and directions describe a traversal hypothesis, not
+    physical drawing direction. Graph-dependent invariants are checked against
+    the source graph by :func:`covering_walk`.
+    """
+
+    xy: np.ndarray
+    edge_ids: tuple[int, ...]
+    edge_directions: tuple[Literal["forward", "reverse"], ...]
+    start_node: int | None
+    end_node: int | None
+    covered_edge_ids: tuple[int, ...]
+    covered_edge_count: int
+    total_edge_count: int
+    repeated_edge_count: int
+    length_px: float
+
+    def __post_init__(self) -> None:
+        points = np.asarray(self.xy, dtype=float)
+        if points.ndim != 2 or points.shape[1] != 2 or not np.isfinite(points).all():
+            raise ValueError("walk coordinates must have shape (N, 2) and be finite")
+        edge_ids = tuple(self.edge_ids)
+        if any(
+            isinstance(edge_id, bool) or not isinstance(edge_id, (int, np.integer)) or edge_id < 0
+            for edge_id in edge_ids
+        ):
+            raise ValueError("walk edge IDs must be nonnegative integers")
+        edge_ids = tuple(int(edge_id) for edge_id in edge_ids)
+        directions = tuple(self.edge_directions)
+        if len(directions) != len(edge_ids) or any(
+            direction not in {"forward", "reverse"} for direction in directions
+        ):
+            raise ValueError("walk directions must match the edge traversal sequence")
+        covered_edge_ids = tuple(self.covered_edge_ids)
+        expected_covered = tuple(sorted(set(edge_ids)))
+        if covered_edge_ids != expected_covered:
+            raise ValueError("covered edge IDs must be the sorted unique traversed edge IDs")
+        if any(
+            isinstance(edge_id, bool) or not isinstance(edge_id, (int, np.integer)) or edge_id < 0
+            for edge_id in covered_edge_ids
+        ):
+            raise ValueError("covered edge IDs must be nonnegative integers")
+        counts = (self.covered_edge_count, self.total_edge_count, self.repeated_edge_count)
+        if any(
+            isinstance(count, bool) or not isinstance(count, (int, np.integer)) or count < 0
+            for count in counts
+        ):
+            raise ValueError("walk edge counts must be nonnegative integers")
+        covered_count, total_count, repeated_count = (int(count) for count in counts)
+        if (
+            covered_count != len(covered_edge_ids)
+            or covered_count != total_count
+            or covered_edge_ids != tuple(range(total_count))
+            or repeated_count != len(edge_ids) - covered_count
+        ):
+            raise ValueError("walk edge coverage counts are inconsistent")
+        if (self.start_node is None) != (self.end_node is None):
+            raise ValueError("walk start and end nodes must both be set or both be None")
+        if self.start_node is not None and any(
+            isinstance(node, bool) or not isinstance(node, (int, np.integer)) or node < 0
+            for node in (self.start_node, self.end_node)
+        ):
+            raise ValueError("walk endpoints must be nonnegative integer node IDs")
+        if not np.isfinite(self.length_px) or self.length_px < 0.0:
+            raise ValueError("walk length must be finite and nonnegative")
+        geometry_length = float(np.linalg.norm(np.diff(points, axis=0), axis=1).sum())
+        if not np.isclose(self.length_px, geometry_length, rtol=1e-6, atol=1e-9):
+            raise ValueError("walk length must match its traversal geometry")
+        if edge_ids:
+            if self.start_node is None or len(points) < 2:
+                raise ValueError("an edge-covering walk must include endpoints and geometry")
+        elif self.start_node is None:
+            if len(points) != 0 or total_count != 0:
+                raise ValueError("an empty graph walk must have no coordinates or edges")
+        elif len(points) != 1 or self.start_node != self.end_node or total_count != 0:
+            raise ValueError("a walk without edges must represent one isolated node")
+        points = np.array(points, copy=True)
+        points.setflags(write=False)
+        object.__setattr__(self, "xy", points)
+        object.__setattr__(self, "edge_ids", edge_ids)
+        object.__setattr__(self, "edge_directions", directions)
+        object.__setattr__(self, "covered_edge_ids", expected_covered)
+        object.__setattr__(self, "covered_edge_count", covered_count)
+        object.__setattr__(self, "total_edge_count", total_count)
+        object.__setattr__(self, "repeated_edge_count", repeated_count)
+        object.__setattr__(self, "length_px", float(self.length_px))
+        if self.start_node is not None:
+            object.__setattr__(self, "start_node", int(self.start_node))
+            assert self.end_node is not None
+            object.__setattr__(self, "end_node", int(self.end_node))
+
+    def _validate_graph(self, graph: SkeletonGraph) -> None:
+        if self.total_edge_count != len(graph.edges):
+            raise ValueError("walk total edge count does not match its graph")
+        node_by_id = {node.id: node for node in graph.nodes}
+        if self.start_node is None:
+            if graph.nodes or graph.edges:
+                raise ValueError("empty walk does not match a nonempty graph")
+            return
+        if self.start_node not in node_by_id or self.end_node not in node_by_id:
+            raise ValueError("walk endpoint references an unknown graph node")
+        if not self.edge_ids:
+            if self.start_node != self.end_node or not np.allclose(
+                self.xy[0], node_by_id[self.start_node].xy
+            ):
+                raise ValueError("walk without edges must match its isolated graph node")
+            return
+        current = self.start_node
+        expected_points = [np.asarray(node_by_id[current].xy, dtype=float)]
+        for edge_id, direction in zip(self.edge_ids, self.edge_directions, strict=True):
+            if edge_id >= len(graph.edges):
+                raise ValueError("walk references an unknown graph edge")
+            edge = graph.edges[edge_id]
+            if direction == "forward" and edge.a == current:
+                current = edge.b
+                edge_points = edge.xy
+            elif direction == "reverse" and edge.b == current:
+                current = edge.a
+                edge_points = edge.xy[::-1]
+            else:
+                raise ValueError("walk edge directions are not connected in sequence")
+            expected_points.extend(edge_points[1:])
+        if current != self.end_node:
+            raise ValueError("walk end node does not match its traversal")
+        if not np.allclose(self.xy, np.asarray(expected_points), rtol=1e-7, atol=1e-9):
+            raise ValueError("walk coordinates do not match oriented edge geometry")
+        expected_length = float(sum(graph.edges[edge_id].length_px for edge_id in self.edge_ids))
+        if not np.isclose(self.length_px, expected_length, rtol=1e-6, atol=1e-9):
+            raise ValueError("walk length does not match its traversed graph edges")
+
+
+@dataclass(frozen=True)
 class PathScore:
     """Measured ranking values for one feasible route.
 
@@ -211,6 +449,8 @@ class PathScore:
         Absolute error from ``expected_length_px``, in pixels.
     turning_cost : float or None
         Sampled mean squared turn angle, in squared radians.
+    endpoint_tangent_error_deg : float or None
+        Mean angular error for supplied endpoint tangent evidence, in degrees.
 
     A ``None`` score dimension was not applicable or requested; it does not
     represent zero. The model is immutable.
@@ -221,6 +461,7 @@ class PathScore:
     measured_confidence: float
     length_error_px: float | None
     turning_cost: float | None
+    endpoint_tangent_error_deg: float | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -228,6 +469,7 @@ class PathScore:
             "endpoint_order_error_px",
             "length_error_px",
             "turning_cost",
+            "endpoint_tangent_error_deg",
         ):
             value = getattr(self, name)
             if value is not None and (not np.isfinite(value) or value < 0.0):
@@ -262,6 +504,12 @@ class PathRankingPolicy:
     turning_cost_is_evidence : bool
         Whether turning-cost separation may reduce ambiguity. Turning cost is
         otherwise a deterministic ranking tie-breaker only.
+    ambiguity_endpoint_tangent_deg : float
+        Maximum tangent-error difference considered overlapping when enabled.
+    tangent_error_is_evidence : bool
+        Whether endpoint tangent error guides ranking and ambiguity decisions.
+    endpoint_tangents_are_hard : bool
+        Whether routes outside the supplied tangent tolerance are infeasible.
 
     Guide tie tolerance controls ranking order and is separate from the
     ambiguity tolerances. The model is immutable.
@@ -276,6 +524,9 @@ class PathRankingPolicy:
     ambiguity_length_error_px: float = 1.0
     ambiguity_turning_cost: float = 0.1
     turning_cost_is_evidence: bool = False
+    ambiguity_endpoint_tangent_deg: float = 15.0
+    tangent_error_is_evidence: bool = True
+    endpoint_tangents_are_hard: bool = False
 
     def __post_init__(self) -> None:
         for name in ("guide_samples", "turning_samples"):
@@ -290,6 +541,7 @@ class PathRankingPolicy:
             "ambiguity_confidence",
             "ambiguity_length_error_px",
             "ambiguity_turning_cost",
+            "ambiguity_endpoint_tangent_deg",
         ):
             value = getattr(self, name)
             if not np.isfinite(value) or value < 0.0:
@@ -297,6 +549,10 @@ class PathRankingPolicy:
             object.__setattr__(self, name, float(value))
         if not isinstance(self.turning_cost_is_evidence, bool):
             raise TypeError("turning_cost_is_evidence must be bool")
+        if not isinstance(self.tangent_error_is_evidence, bool):
+            raise TypeError("tangent_error_is_evidence must be bool")
+        if not isinstance(self.endpoint_tangents_are_hard, bool):
+            raise TypeError("endpoint_tangents_are_hard must be bool")
 
 
 DEFAULT_RANKING_POLICY = PathRankingPolicy()

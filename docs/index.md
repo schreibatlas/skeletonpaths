@@ -9,7 +9,7 @@ SkeletonPaths accepts images indexed as `[row, column]`, but all public geometri
 | Input | Entry point | Installation |
 | --- | --- | --- |
 | Already-thinned skeleton | {func}`skeletonpaths.graph_from_skeleton` | Base package |
-| Binary ink mask | {func}`skeletonpaths.graph_from_mask` | `skeletonpaths[image]` |
+| Binary ink mask | {func}`skeletonpaths.graph_from_mask` or {func}`skeletonpaths.analyze_mask` | `skeletonpaths[image]` |
 
 ```python
 import numpy as np

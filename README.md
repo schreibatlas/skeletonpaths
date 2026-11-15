@@ -45,6 +45,9 @@ print(selection.ambiguous)
 
 For a binary mask, use `graph_from_mask(mask)`. It skeletonizes the mask, derives a radius map from the source mask when one is not supplied, and retains all connected components by default.
 
+
+Use `analyze_mask(mask)` when reports need the mask, read-only skeleton, radius, confidence, and graph together. It returns a `SkeletonAnalysis`; radius is the Euclidean distance transform, and default confidence is all-ones foreground evidence, not a probability. Empty masks produce an empty graph and zero radius. For a connected graph, `covering_walk(graph, start_node=..., end_node=...)` returns a deterministic traversal hypothesis that may repeat edges. Its order is not physical drawing direction.
+
 ## Documentation
 
 The Sphinx guides and API reference are maintained in the [documentation sources on GitHub](https://github.com/schreibatlas/skeletonpaths/tree/main/docs). They explain graph construction, route selection, ranking and ambiguity, search limits, and the supported API.
@@ -63,6 +66,9 @@ Input arrays use image indexing `[row, column]`. Public coordinates use `(x=colu
 
 Pixel adjacency uses orthogonal neighbors and permits a diagonal neighbor only when neither orthogonal bridge pixel is foreground. This bridge-aware rule is neither plain four-connectivity nor naïve eight-connectivity, and it determines graph topology. Adjacent junction pixels remain separate graph nodes. Graph construction preserves the input topology by default because spur pruning defaults to zero.
 
+
+Graph edges represent undirected raster evidence. Their stored endpoint and edge order is deterministic for geometry assembly, not physical drawing order. `SkeletonPath` is a non-repeating route through part of a graph; `SkeletonWalk` is an ordered traversal that may repeat edges to cover a connected graph.
+
 `graph_from_mask()` uses eight-neighbor connected-component labeling when `min_component_area` is greater than zero. Components smaller than the requested area are removed before skeletonization. A supplied `radius` map must match the image shape and contain finite nonnegative values. A supplied `confidence` map must match the image shape and contain values between zero and one.
 
 ## Data model
@@ -70,11 +76,13 @@ Pixel adjacency uses orthogonal neighbors and permits a diagonal neighbor only w
 The public models are frozen. Graph and path collections are tuples, graph and path coordinate arrays are read-only, and inventory mappings are immutable.
 
 - `SkeletonGraph` contains nodes and edges, with `component_count`, `cycle_count`, `endpoint_count`, and `junction_count` graph diagnostics.
+- `SkeletonAnalysis` contains owned read-only mask, skeleton, radius, and confidence arrays alongside the graph. Its graph diagnostics delegate to `SkeletonGraph`.
 - `SkeletonNode` records its integer ID, `(x, y)` coordinate, degree, radius in pixels, and confidence.
 - `SkeletonEdge` records endpoint node IDs, ordered `(x, y)` geometry, length in pixels, mean radius, and confidence.
 - `TopologyRoute` records an ordered edge sequence, start and end node IDs, and route-level cycle count. Routes are undirected graph traversals with an explicit orientation for geometry assembly.
 - `SkeletonPath` contains assembled route geometry, edge IDs, oriented endpoint IDs, length, measured confidence, route cycle count, and `PathScore`. It does not contain selection ambiguity flags.
-- `PathScore` reports guide distance in pixels, ordered-endpoint error in pixels, measured confidence, expected-length error in pixels, and sampled turning cost in squared radians. Measurements that do not apply are `None`.
+- `SkeletonWalk` records each traversed edge ID and direction, including repeats, plus unique covered edge IDs, coverage and repetition counts, endpoints, geometry, and traversal length.
+- `PathScore` reports guide distance, ordered-endpoint error, endpoint-tangent error in degrees, measured confidence, expected-length error, and sampled turning cost in squared radians. Measurements that do not apply are `None`.
 - `PathSelection` contains the selected `path`, whether a competing route is ambiguous, whether the same route has an ambiguous orientation, and `feasible_path_count`.
 - `TopologyPathInventory` stores enumerated routes by the requested path kinds for reuse during ranking.
 
@@ -102,12 +110,15 @@ The public models are frozen. Graph and path collections are tuples, graph and p
 | `ambiguity_length_error_px` | 1.0 | Maximum expected-length-error difference treated as overlapping evidence |
 | `ambiguity_turning_cost` | 0.1 | Turning-cost tolerance when turning is explicitly used as ambiguity evidence |
 | `turning_cost_is_evidence` | `False` | Whether turning cost may reduce route ambiguity |
+| `ambiguity_endpoint_tangent_deg` | 15.0 | Maximum tangent-error difference treated as overlapping evidence |
+| `tangent_error_is_evidence` | `True` | Whether tangent error guides ranking and ambiguity |
+| `endpoint_tangents_are_hard` | `False` | Whether tangent errors outside the supplied tolerance exclude routes |
 
-With `candidate_xy`, ranking compares symmetric guide distance first. Endpoint order breaks guide ties within `guide_tie_tolerance_px`, followed by measured confidence, expected-length error, turning cost, and edge IDs. The tie tolerance is applied directly. Guide distances are not rounded to decimal places. Without a guide, measured confidence is the primary score. Route confidence is the length-weighted mean of its edge confidences.
+With `candidate_xy`, ranking compares symmetric guide distance first. Endpoint order breaks guide ties within `guide_tie_tolerance_px`, followed by tangent error when enabled, measured confidence, expected-length error, turning cost, and edge IDs. Without a guide, enabled tangent error is considered before measured confidence. Endpoint tangent constraints are ranking evidence by default; `endpoint_tangents_are_hard=True` makes them feasibility constraints using `tangent_tolerance_deg`. Route confidence is the length-weighted mean of edge confidences.
 
-Ambiguity compares score evidence using the configured tolerances. Turning cost is a deterministic ranking tie-breaker, but by default it does not make the selection appear more certain. Set `turning_cost_is_evidence=True` only when that interpretation is appropriate for the application. `ambiguous` concerns competing edge routes; `orientation_ambiguous` concerns reversed orientations of the selected route. Neither flag changes measured confidence.
+Ambiguity compares score evidence using the configured tolerances, including tangent error when enabled. Turning cost is a deterministic ranking tie-breaker, but by default it does not make the selection appear more certain. `ambiguous` concerns competing edge routes; `orientation_ambiguous` concerns reversed orientations of the selected route. Tangent or endpoint evidence can resolve orientation ambiguity, but neither the route nor its orientation establishes physical drawing direction.
 
-Candidate geometry and `expected_endpoints` use `(x, y)` coordinates. Endpoint feasibility uses `endpoint_tolerance_px`, which defaults to three pixels. Candidate alignment or endpoint order does not establish physical drawing direction.
+Candidate geometry, `expected_endpoints`, and `expected_endpoint_tangents` use `(x, y)` coordinates or vectors. Endpoint feasibility uses `endpoint_tolerance_px`; tangent scoring uses `tangent_tolerance_deg` only when the ranking policy enables hard tangent constraints. Alignment and ordered orientation remain route evidence, not physical drawing direction.
 
 ## Search limits and route inventories
 
@@ -137,8 +148,8 @@ When either search limit is exceeded, `PathSearchLimitError` is raised rather th
 The supported package-root exports are:
 
 - Constants: `DEFAULT_MAX_PATHS`, `DEFAULT_RANKING_POLICY`, `DEFAULT_SEARCH_LIMITS`, `__version__`.
-- Models and errors: `NoFeasiblePathError`, `PathRankingPolicy`, `PathScore`, `PathSearchLimitError`, `PathSearchLimits`, `PathSelection`, `SkeletonEdge`, `SkeletonGraph`, `SkeletonNode`, `SkeletonPath`, `TopologyPathInventory`, and `TopologyRoute`.
-- Graph and image functions: `build_skeleton_graph`, `graph_from_mask`, `graph_from_skeleton`, and `prune_spurs`.
+- Models and errors: `DisconnectedGraphError`, `NoFeasiblePathError`, `PathRankingPolicy`, `PathScore`, `PathSearchLimitError`, `PathSearchLimits`, `PathSelection`, `SkeletonAnalysis`, `SkeletonEdge`, `SkeletonGraph`, `SkeletonImage`, `SkeletonNode`, `SkeletonPath`, `SkeletonWalk`, `TopologyPathInventory`, and `TopologyRoute`.
+- Graph and image functions: `analyze_mask`, `build_skeleton_graph`, `covering_walk`, `graph_from_mask`, `graph_from_skeleton`, and `prune_spurs`.
 - Routing and ranking functions: `prepare_topology_paths`, `rank_paths`, and `select_path`.
 
 `graph_from_skeleton()` is the lightweight entry point for pre-thinned images. `graph_from_mask()` uses the optional image dependencies. `build_skeleton_graph()` is the lower-level graph constructor and skeletonizes by default unless `already_skeleton=True`.

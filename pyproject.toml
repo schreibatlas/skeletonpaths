@@ -86,4 +86,7 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 
 
 [tool.ruff.format]
-exclude = ["skeletonpaths_docs_implementation_brief.md"]
+exclude = [
+  "skeletonpaths_docs_implementation_brief.md",
+  "02_skeletonpaths_directed_walk_support.md",
+]

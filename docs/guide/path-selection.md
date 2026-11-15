@@ -1,6 +1,6 @@
 # Path selection
 
-Graph construction supplies an undirected topology. Route enumeration produces connected edge sequences, and ranking evaluates only routes that satisfy the requested feasibility constraints. Ordered path geometry is useful for measurement and ranking, but does not establish physical direction.
+Graph construction supplies undirected topology. Graph edges and their storage order are raster evidence, not drawing order. `SkeletonPath` is a connected route with unique edge IDs. `SkeletonWalk` is a different model for ordered graph traversal and may repeat edges. Neither model claims physical pen direction.
 
 ## Route kinds
 
@@ -23,6 +23,9 @@ Graph construction supplies an undirected topology. Route enumeration produces c
 `expected_cycles` constrains the selected route's cycle count, not {class}`skeletonpaths.SkeletonGraph` `cycle_count`.
 
 A `candidate_xy` guide affects ranking, not feasibility. It cannot rescue a route that fails a hard endpoint or topology constraint. Candidate and expected endpoint coordinates use `(x, y)` pixel units. A guide must be a finite `(N, 2)` array with at least two distinct points. Symmetric guide distance measures geometric alignment; endpoint-order error can help resolve orientation when guide geometry ties. Guide geometry is not evidence of physical direction.
+
+
+`expected_endpoint_tangents=(start, end)` supplies optional ordered xy direction vectors. Tangent error is ranking evidence by default and is included in ambiguity analysis. Set `PathRankingPolicy(endpoint_tangents_are_hard=True)` to filter routes outside `tangent_tolerance_deg`; the default is a 35-degree tolerance. Tangents are estimated from separated endpoint samples because raster endpoints can be noisy.
 
 The hard-endpoint versus misleading-guide behavior is demonstrated by the canonical example:
 

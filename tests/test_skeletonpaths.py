@@ -14,10 +14,14 @@ from skeletonpaths import (
     PathSelection,
     SkeletonEdge,
     SkeletonGraph,
+    SkeletonImage,
     SkeletonNode,
+    SkeletonWalk,
     TopologyPathInventory,
     TopologyRoute,
+    analyze_mask,
     build_skeleton_graph,
+    covering_walk,
     graph_from_mask,
     graph_from_skeleton,
     prepare_topology_paths,
@@ -724,6 +728,7 @@ def test_junction_motifs_retain_per_pixel_topology(segments, expected):
 
 
 def test_internal_module_exports_and_deprecated_names():
+    import skeletonpaths
     import skeletonpaths.core as compatibility
 
     graph = graph_from_skeleton(np.pad(np.ones((1, 5), dtype=bool), ((2, 2), (1, 1))))
@@ -731,9 +736,18 @@ def test_internal_module_exports_and_deprecated_names():
 
     assert graph_from_skeleton.__module__ == "skeletonpaths.graph"
     assert graph_from_mask.__module__ == "skeletonpaths.image"
+    assert analyze_mask.__module__ == "skeletonpaths.image"
+    assert covering_walk.__module__ == "skeletonpaths.walk"
+    assert SkeletonImage.__module__ == "skeletonpaths.model"
+    assert SkeletonWalk.__module__ == "skeletonpaths.model"
     assert prepare_topology_paths.__module__ == "skeletonpaths.routing"
     assert rank_paths.__module__ == "skeletonpaths.ranking"
     assert compatibility.rank_paths is rank_paths
+    assert compatibility.analyze_mask is analyze_mask
+    assert compatibility.covering_walk is covering_walk
+    assert skeletonpaths.SkeletonAnalysis.__module__ == "skeletonpaths.model"
+    assert compatibility.SkeletonAnalysis is skeletonpaths.SkeletonAnalysis
+    assert compatibility.DisconnectedGraphError is skeletonpaths.DisconnectedGraphError
     with pytest.warns(DeprecationWarning, match="rank_topology_paths"):
         legacy_ranked = rank_topology_paths(graph)
     with pytest.warns(DeprecationWarning, match="select_topology_path"):

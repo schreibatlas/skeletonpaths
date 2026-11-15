@@ -20,6 +20,16 @@ The package root, `skeletonpaths`, is the supported import surface. The explicit
 .. autofunction:: skeletonpaths.prune_spurs
 ```
 
+## Mask analysis and edge covering
+
+```{eval-rst}
+.. autofunction:: skeletonpaths.analyze_mask
+```
+
+```{eval-rst}
+.. autofunction:: skeletonpaths.covering_walk
+```
+
 ## Route enumeration, ranking, and selection
 
 ```{eval-rst}
@@ -46,6 +56,19 @@ The package root, `skeletonpaths`, is the supported import surface. The explicit
 
 ```{eval-rst}
 .. autoclass:: skeletonpaths.SkeletonGraph
+```
+
+
+```{eval-rst}
+.. autoclass:: skeletonpaths.SkeletonAnalysis
+```
+
+```{eval-rst}
+.. autoclass:: skeletonpaths.SkeletonImage
+```
+
+```{eval-rst}
+.. autoclass:: skeletonpaths.SkeletonWalk
 ```
 
 ```{eval-rst}
@@ -93,6 +116,10 @@ The package root, `skeletonpaths`, is the supported import surface. The explicit
 ```
 
 ## Errors
+
+```{eval-rst}
+.. autoclass:: skeletonpaths.DisconnectedGraphError
+```
 
 ```{eval-rst}
 .. autoclass:: skeletonpaths.NoFeasiblePathError
