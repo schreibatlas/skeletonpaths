@@ -1,0 +1,79 @@
+schema: releaseledger.entry-batch.v1
+operation: create
+schema_version: 1
+object_type: release_entry_batch
+release_version: 0.1.0
+git_base_ref: 4b825dc642cb6eb9a060e54bf8d69288fbee4904
+git_base_sha: 4b825dc642cb6eb9a060e54bf8d69288fbee4904
+git_head_ref: 6c36856155bc434e13074578b38214a0931b1bd3
+git_head_sha: 6c36856155bc434e13074578b38214a0931b1bd3
+include_merges: nontrivial
+entries:
+- kind: added
+  summary: "Added graph construction from binary masks or skeletons, spur pruning, and topology-aware route ranking and selection"
+  status: accepted
+  source_refs:
+  - git:5a0f494421ff85a6fa1f86382b64866be02c05dd
+  paths:
+  - .codecrate.toml
+  - .github/workflows/ci.yml
+  - .github/workflows/publish.yml
+  - .gitignore
+  - .ledger/ledger.toml
+  - .ledger/releaseledger/.ledger-project.toml
+  - .ledger/releaseledger/config.toml
+  - .ledger/releaseledger/data/.ledger-project.toml
+  - .ledger/taskledger/.ledger-project.toml
+  - .ledger/taskledger/config.toml
+  - .pre-commit-config.yaml
+  - CONTRIBUTING.md
+  - README.md
+  - pyproject.toml
+  - skeletonpaths/__init__.py
+  - skeletonpaths/core.py
+  - tests/test_boundaries.py
+  - tests/test_skeletonpaths.py
+  sources:
+  - git:5a0f494421ff85a6fa1f86382b64866be02c05dd
+  prs: []
+  issues: []
+  contributors:
+  - '@holgern'
+- kind: added
+  summary: "Added mask radius, component filtering, bounded route inventories, score and ambiguity metadata, and PlanarCurve metrics"
+  status: accepted
+  source_refs:
+  - git:ca41e034181815e9c861892dc0468cbd16e957ab
+  paths:
+  - README.md
+  - examples/01_basic_straight.py
+  - examples/02_spur_pruning.py
+  - examples/03_guided_branch_selection.py
+  - examples/04_loop_detection.py
+  - examples/05_mask_radius_confidence.py
+  - examples/06_inventory_reranking.py
+  - examples/07_planarcurve_interop.py
+  - examples/README.md
+  - pyproject.toml
+  - skeletonpaths/__init__.py
+  - skeletonpaths/core.py
+  - tests/test_skeletonpaths.py
+  sources:
+  - git:ca41e034181815e9c861892dc0468cbd16e957ab
+  prs: []
+  issues: []
+  contributors:
+  - '@holgern'
+- kind: changed
+  summary: "Changed package metadata to support scikit-image 0.25.2"
+  status: accepted
+  source_refs:
+  - git:6c36856155bc434e13074578b38214a0931b1bd3
+  paths:
+  - pyproject.toml
+  sources:
+  - git:6c36856155bc434e13074578b38214a0931b1bd3
+  prs: []
+  issues: []
+  contributors:
+  - '@holgern'

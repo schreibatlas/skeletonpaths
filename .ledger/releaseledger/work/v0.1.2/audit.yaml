@@ -1,0 +1,53 @@
+schema_version: 1
+object_type: commit_audit_sheet
+versioning:
+  schema_version: 1
+  revision: 1
+release_version: v0.1.2
+git_base_ref: v0.1.1
+git_base_sha: 0e1ce4fb0421c1f64d04203ebd8bf46ff1ffc451
+git_head_ref: HEAD
+git_head_sha: 026d957dc0d27bc67703b380294d8bf77bf9ddb4
+git_range: 0e1ce4fb0421c1f64d04203ebd8bf46ff1ffc451..026d957dc0d27bc67703b380294d8bf77bf9ddb4
+commit_count: 1
+rows:
+- sha: 026d957dc0d27bc67703b380294d8bf77bf9ddb4
+  source_ref: git:026d957dc0d27bc67703b380294d8bf77bf9ddb4
+  short_sha: 026d957
+  changed_paths:
+  - README.md
+  - docs/conf.py
+  - docs/getting-started.md
+  - docs/guide/ambiguity-and-ranking.md
+  - docs/guide/graph-construction.md
+  - docs/guide/path-selection.md
+  - docs/index.md
+  - docs/reference/api.md
+  - docs/reference/behavior-contracts.md
+  - examples/09_analyze_mask.py
+  - examples/10_covering_walk.py
+  - pyproject.toml
+  - skeletonpaths/__init__.py
+  - skeletonpaths/core.py
+  - skeletonpaths/image.py
+  - skeletonpaths/model.py
+  - skeletonpaths/ranking.py
+  - skeletonpaths/walk.py
+  - tests/test_analysis.py
+  - tests/test_covering_walk.py
+  - tests/test_dependency_modes.py
+  - tests/test_mask_analysis.py
+  - tests/test_ranking.py
+  - tests/test_skeletonpaths.py
+  stats:
+    files_changed: 24
+    insertions: 1510
+    deletions: 80
+  inspected: false
+  inspected_paths: []
+  observed_behavior: ''
+  public_impact: unknown
+  decision: needs_review
+  stale: false
+  evidence_subject: 'feat: deterministic edge-covering walks with repeat and direction
+    metadata'

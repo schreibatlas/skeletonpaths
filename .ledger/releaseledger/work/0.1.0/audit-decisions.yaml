@@ -1,0 +1,87 @@
+rows:
+- sha: c53ef6abfcb18821ec43d33cfaeebd83fccdba90
+  inspected: true
+  inspected_paths:
+  - .gitignore
+  - LICENSE
+  - README.md
+  observed_behavior: "Initial repository commit adds the Apache license, README title, and ignore rules, with no library source or runtime behavior."
+  public_impact: none
+  decision: rejected
+  target_entry_key: null
+  target_entry_id: null
+  notes: "Repository scaffolding only, so no product changelog entry is warranted."
+  stale: false
+- sha: 5a0f494421ff85a6fa1f86382b64866be02c05dd
+  inspected: true
+  inspected_paths:
+  - .codecrate.toml
+  - .github/workflows/ci.yml
+  - .github/workflows/publish.yml
+  - .gitignore
+  - .ledger/ledger.toml
+  - .ledger/releaseledger/.ledger-project.toml
+  - .ledger/releaseledger/config.toml
+  - .ledger/releaseledger/data/.ledger-project.toml
+  - .ledger/taskledger/.ledger-project.toml
+  - .ledger/taskledger/config.toml
+  - .pre-commit-config.yaml
+  - CONTRIBUTING.md
+  - README.md
+  - pyproject.toml
+  - skeletonpaths/__init__.py
+  - skeletonpaths/core.py
+  - tests/test_boundaries.py
+  - tests/test_skeletonpaths.py
+  observed_behavior: "Introduces the public package for building graphs from masks or skeletons, pruning spurs, enumerating topology routes, ranking candidates, and selecting routes with endpoint constraints and ambiguity metadata."
+  public_impact: public
+  decision: accepted
+  target_entry_key: null
+  target_entry_id: null
+  notes: ""
+  stale: false
+- sha: ca41e034181815e9c861892dc0468cbd16e957ab
+  inspected: true
+  inspected_paths:
+  - README.md
+  - examples/01_basic_straight.py
+  - examples/02_spur_pruning.py
+  - examples/03_guided_branch_selection.py
+  - examples/04_loop_detection.py
+  - examples/05_mask_radius_confidence.py
+  - examples/06_inventory_reranking.py
+  - examples/07_planarcurve_interop.py
+  - examples/README.md
+  - pyproject.toml
+  - skeletonpaths/__init__.py
+  - skeletonpaths/core.py
+  - tests/test_skeletonpaths.py
+  observed_behavior: "Adds automatic mask radius and optional component filtering, reusable bounded route inventories, richer score and ambiguity diagnostics, and PlanarCurve polyline metrics."
+  public_impact: public
+  decision: accepted
+  target_entry_key: null
+  target_entry_id: null
+  notes: ""
+  stale: false
+- sha: 83898f1d6f7adbd14b25d02461f25a688f0f3cba
+  inspected: true
+  inspected_paths:
+  - .github/workflows/publish.yml
+  observed_behavior: "The PyPI publishing workflow now passes its configured API token to the upload action."
+  public_impact: none
+  decision: rejected
+  target_entry_key: null
+  target_entry_id: null
+  notes: "Release automation configuration only; no package runtime or API behavior changes."
+  stale: false
+- sha: 6c36856155bc434e13074578b38214a0931b1bd3
+  inspected: true
+  inspected_paths:
+  - pyproject.toml
+  observed_behavior: "Package metadata lowers the minimum supported scikit-image version to 0.25.2 while retaining the 0.27 upper bound."
+  public_impact: public
+  decision: accepted
+  target_entry_key: null
+  target_entry_id: null
+  notes: ""
+  stale: false

@@ -1,0 +1,66 @@
+schema: releaseledger.entry-batch.v1
+operation: create
+schema_version: 1
+object_type: release_entry_batch
+release_version: v0.1.2
+git_base_ref: 0e1ce4fb0421c1f64d04203ebd8bf46ff1ffc451
+git_base_sha: 0e1ce4fb0421c1f64d04203ebd8bf46ff1ffc451
+git_head_ref: 026d957dc0d27bc67703b380294d8bf77bf9ddb4
+git_head_sha: 026d957dc0d27bc67703b380294d8bf77bf9ddb4
+include_merges: nontrivial
+entries:
+- kind: added
+  summary: "Added analyze_mask to return read-only mask, skeleton, radius, confidence, and graph data"
+  status: accepted
+  source_refs:
+  - git:026d957dc0d27bc67703b380294d8bf77bf9ddb4
+  paths:
+  - skeletonpaths/image.py
+  - skeletonpaths/model.py
+  - skeletonpaths/core.py
+  - skeletonpaths/__init__.py
+  - tests/test_analysis.py
+  - tests/test_mask_analysis.py
+  - examples/09_analyze_mask.py
+  - docs/getting-started.md
+  - docs/guide/graph-construction.md
+  sources:
+  - git:026d957dc0d27bc67703b380294d8bf77bf9ddb4
+  prs: []
+  issues: []
+  contributors:
+  - '@holgern'
+- kind: added
+  summary: "Added deterministic edge-covering walks for connected graphs, with endpoint control, edge directions, and repeat counts"
+  status: accepted
+  source_refs: []
+  paths:
+  - skeletonpaths/walk.py
+  - skeletonpaths/model.py
+  - tests/test_covering_walk.py
+  - examples/10_covering_walk.py
+  - docs/getting-started.md
+  - docs/reference/behavior-contracts.md
+  sources:
+  - git:026d957dc0d27bc67703b380294d8bf77bf9ddb4
+  prs: []
+  issues: []
+  contributors:
+  - '@holgern'
+- kind: added
+  summary: "Added endpoint-tangent scoring and optional hard constraints to route ranking and orientation ambiguity analysis"
+  status: accepted
+  source_refs: []
+  paths:
+  - skeletonpaths/ranking.py
+  - skeletonpaths/model.py
+  - tests/test_ranking.py
+  - docs/guide/ambiguity-and-ranking.md
+  - docs/guide/path-selection.md
+  - docs/reference/api.md
+  sources:
+  - git:026d957dc0d27bc67703b380294d8bf77bf9ddb4
+  prs: []
+  issues: []
+  contributors:
+  - '@holgern'

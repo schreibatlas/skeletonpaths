@@ -1,0 +1,173 @@
+schema_version: 1
+object_type: commit_audit_sheet
+versioning:
+  schema_version: 1
+  revision: 4
+release_version: 0.1.0
+git_base_ref: :root
+git_base_sha: 4b825dc642cb6eb9a060e54bf8d69288fbee4904
+git_head_ref: v0.1.0
+git_head_sha: 6c36856155bc434e13074578b38214a0931b1bd3
+git_range: :root..6c36856155bc434e13074578b38214a0931b1bd3
+commit_count: 5
+rows:
+- sha: c53ef6abfcb18821ec43d33cfaeebd83fccdba90
+  source_ref: git:c53ef6abfcb18821ec43d33cfaeebd83fccdba90
+  short_sha: c53ef6a
+  changed_paths: []
+  stats:
+    files_changed: 0
+    insertions: 0
+    deletions: 0
+  inspected: true
+  inspected_paths:
+  - .gitignore
+  - LICENSE
+  - README.md
+  observed_behavior: Initial repository commit adds the Apache license, README title,
+    and ignore rules, with no library source or runtime behavior.
+  public_impact: none
+  decision: rejected
+  stale: false
+  evidence_subject: Initial commit
+  notes: Repository scaffolding only, so no product changelog entry is warranted.
+- sha: 5a0f494421ff85a6fa1f86382b64866be02c05dd
+  source_ref: git:5a0f494421ff85a6fa1f86382b64866be02c05dd
+  short_sha: 5a0f494
+  changed_paths:
+  - .codecrate.toml
+  - .github/workflows/ci.yml
+  - .github/workflows/publish.yml
+  - .gitignore
+  - .ledger/ledger.toml
+  - .ledger/releaseledger/.ledger-project.toml
+  - .ledger/releaseledger/config.toml
+  - .ledger/releaseledger/data/.ledger-project.toml
+  - .ledger/taskledger/.ledger-project.toml
+  - .ledger/taskledger/config.toml
+  - .pre-commit-config.yaml
+  - CONTRIBUTING.md
+  - README.md
+  - pyproject.toml
+  - skeletonpaths/__init__.py
+  - skeletonpaths/core.py
+  - tests/test_boundaries.py
+  - tests/test_skeletonpaths.py
+  stats:
+    files_changed: 18
+    insertions: 1271
+    deletions: 1
+  inspected: true
+  inspected_paths:
+  - .codecrate.toml
+  - .github/workflows/ci.yml
+  - .github/workflows/publish.yml
+  - .gitignore
+  - .ledger/ledger.toml
+  - .ledger/releaseledger/.ledger-project.toml
+  - .ledger/releaseledger/config.toml
+  - .ledger/releaseledger/data/.ledger-project.toml
+  - .ledger/taskledger/.ledger-project.toml
+  - .ledger/taskledger/config.toml
+  - .pre-commit-config.yaml
+  - CONTRIBUTING.md
+  - README.md
+  - pyproject.toml
+  - skeletonpaths/__init__.py
+  - skeletonpaths/core.py
+  - tests/test_boundaries.py
+  - tests/test_skeletonpaths.py
+  observed_behavior: Introduces the public package for building graphs from masks
+    or skeletons, pruning spurs, enumerating topology routes, ranking candidates,
+    and selecting routes with endpoint constraints and ambiguity metadata.
+  public_impact: public
+  decision: accepted
+  stale: false
+  evidence_subject: 'feat: initial version'
+  target_entry_id: entry-0001
+  notes: ''
+- sha: ca41e034181815e9c861892dc0468cbd16e957ab
+  source_ref: git:ca41e034181815e9c861892dc0468cbd16e957ab
+  short_sha: ca41e03
+  changed_paths:
+  - README.md
+  - examples/01_basic_straight.py
+  - examples/02_spur_pruning.py
+  - examples/03_guided_branch_selection.py
+  - examples/04_loop_detection.py
+  - examples/05_mask_radius_confidence.py
+  - examples/06_inventory_reranking.py
+  - examples/07_planarcurve_interop.py
+  - examples/README.md
+  - pyproject.toml
+  - skeletonpaths/__init__.py
+  - skeletonpaths/core.py
+  - tests/test_skeletonpaths.py
+  stats:
+    files_changed: 13
+    insertions: 667
+    deletions: 114
+  inspected: true
+  inspected_paths:
+  - README.md
+  - examples/01_basic_straight.py
+  - examples/02_spur_pruning.py
+  - examples/03_guided_branch_selection.py
+  - examples/04_loop_detection.py
+  - examples/05_mask_radius_confidence.py
+  - examples/06_inventory_reranking.py
+  - examples/07_planarcurve_interop.py
+  - examples/README.md
+  - pyproject.toml
+  - skeletonpaths/__init__.py
+  - skeletonpaths/core.py
+  - tests/test_skeletonpaths.py
+  observed_behavior: Adds automatic mask radius and optional component filtering,
+    reusable bounded route inventories, richer score and ambiguity diagnostics, and
+    PlanarCurve polyline metrics.
+  public_impact: public
+  decision: accepted
+  stale: false
+  evidence_subject: 'feat: use panarcurve and new examples'
+  target_entry_id: entry-0002
+  notes: ''
+- sha: 83898f1d6f7adbd14b25d02461f25a688f0f3cba
+  source_ref: git:83898f1d6f7adbd14b25d02461f25a688f0f3cba
+  short_sha: 83898f1
+  changed_paths:
+  - .github/workflows/publish.yml
+  stats:
+    files_changed: 1
+    insertions: 2
+    deletions: 0
+  inspected: true
+  inspected_paths:
+  - .github/workflows/publish.yml
+  observed_behavior: The PyPI publishing workflow now passes its configured API token
+    to the upload action.
+  public_impact: none
+  decision: rejected
+  stale: false
+  evidence_subject: 'chore: ci'
+  notes: Release automation configuration only; no package runtime or API behavior
+    changes.
+- sha: 6c36856155bc434e13074578b38214a0931b1bd3
+  source_ref: git:6c36856155bc434e13074578b38214a0931b1bd3
+  short_sha: 6c36856
+  changed_paths:
+  - pyproject.toml
+  stats:
+    files_changed: 1
+    insertions: 1
+    deletions: 1
+  inspected: true
+  inspected_paths:
+  - pyproject.toml
+  observed_behavior: Package metadata lowers the minimum supported scikit-image version
+    to 0.25.2 while retaining the 0.27 upper bound.
+  public_impact: public
+  decision: accepted
+  stale: false
+  evidence_subject: 'chore: pyproject'
+  target_entry_id: entry-0003
+  notes: ''

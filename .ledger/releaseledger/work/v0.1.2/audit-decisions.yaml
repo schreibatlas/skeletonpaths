@@ -1,0 +1,35 @@
+rows:
+- sha: 026d957dc0d27bc67703b380294d8bf77bf9ddb4
+  inspected: true
+  inspected_paths:
+  - README.md
+  - docs/conf.py
+  - docs/getting-started.md
+  - docs/guide/ambiguity-and-ranking.md
+  - docs/guide/graph-construction.md
+  - docs/guide/path-selection.md
+  - docs/index.md
+  - docs/reference/api.md
+  - docs/reference/behavior-contracts.md
+  - examples/09_analyze_mask.py
+  - examples/10_covering_walk.py
+  - pyproject.toml
+  - skeletonpaths/__init__.py
+  - skeletonpaths/core.py
+  - skeletonpaths/image.py
+  - skeletonpaths/model.py
+  - skeletonpaths/ranking.py
+  - skeletonpaths/walk.py
+  - tests/test_analysis.py
+  - tests/test_covering_walk.py
+  - tests/test_dependency_modes.py
+  - tests/test_mask_analysis.py
+  - tests/test_ranking.py
+  - tests/test_skeletonpaths.py
+  observed_behavior: "Adds immutable mask analyses, deterministic edge-covering traversals for connected graphs, and endpoint-tangent scoring and constraints for route ranking."
+  public_impact: public
+  decision: accepted
+  target_entry_key: null
+  target_entry_id: null
+  notes: ''
+  stale: false

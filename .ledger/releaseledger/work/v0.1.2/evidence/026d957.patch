@@ -1,0 +1,2280 @@
+ README.md                            |  23 +++-
+ docs/conf.py                         |   5 +-
+ docs/getting-started.md              |  43 ++++++
+ docs/guide/ambiguity-and-ranking.md  |  20 +--
+ docs/guide/graph-construction.md     |  20 ++-
+ docs/guide/path-selection.md         |   5 +-
+ docs/index.md                        |   2 +-
+ docs/reference/api.md                |  27 ++++
+ docs/reference/behavior-contracts.md |  12 +-
+ examples/09_analyze_mask.py          |  25 ++++
+ examples/10_covering_walk.py         |  36 +++++
+ pyproject.toml                       |   5 +-
+ skeletonpaths/__init__.py            |  16 ++-
+ skeletonpaths/core.py                |  12 +-
+ skeletonpaths/image.py               | 113 +++++++++++-----
+ skeletonpaths/model.py               | 256 +++++++++++++++++++++++++++++++++++
+ skeletonpaths/ranking.py             | 151 +++++++++++++++++++--
+ skeletonpaths/walk.py                | 252 ++++++++++++++++++++++++++++++++++
+ tests/test_analysis.py               | 151 +++++++++++++++++++++
+ tests/test_covering_walk.py          | 217 +++++++++++++++++++++++++++++
+ tests/test_dependency_modes.py       |  13 +-
+ tests/test_mask_analysis.py          |  92 +++++++++++++
+ tests/test_ranking.py                |  80 +++++++++++
+ tests/test_skeletonpaths.py          |  14 ++
+ 24 files changed, 1510 insertions(+), 80 deletions(-)
+
+diff --git a/README.md b/README.md
+index 71afc0f..f28620c 100644
+--- a/README.md
++++ b/README.md
+@@ -45,6 +45,9 @@ print(selection.ambiguous)
+
+ For a binary mask, use `graph_from_mask(mask)`. It skeletonizes the mask, derives a radius map from the source mask when one is not supplied, and retains all connected components by default.
+
++
++Use `analyze_mask(mask)` when reports need the mask, read-only skeleton, radius, confidence, and graph together. It returns a `SkeletonAnalysis`; radius is the Euclidean distance transform, and default confidence is all-ones foreground evidence, not a probability. Empty masks produce an empty graph and zero radius. For a connected graph, `covering_walk(graph, start_node=..., end_node=...)` returns a deterministic traversal hypothesis that may repeat edges. Its order is not physical drawing direction.
++
+ ## Documentation
+
+ The Sphinx guides and API reference are maintained in the [documentation sources on GitHub](https://github.com/schreibatlas/skeletonpaths/tree/main/docs). They explain graph construction, route selection, ranking and ambiguity, search limits, and the supported API.
+@@ -63,6 +66,9 @@ Input arrays use image indexing `[row, column]`. Public coordinates use `(x=colu
+
+ Pixel adjacency uses orthogonal neighbors and permits a diagonal neighbor only when neither orthogonal bridge pixel is foreground. This bridge-aware rule is neither plain four-connectivity nor naïve eight-connectivity, and it determines graph topology. Adjacent junction pixels remain separate graph nodes. Graph construction preserves the input topology by default because spur pruning defaults to zero.
+
++
++Graph edges represent undirected raster evidence. Their stored endpoint and edge order is deterministic for geometry assembly, not physical drawing order. `SkeletonPath` is a non-repeating route through part of a graph; `SkeletonWalk` is an ordered traversal that may repeat edges to cover a connected graph.
++
+ `graph_from_mask()` uses eight-neighbor connected-component labeling when `min_component_area` is greater than zero. Components smaller than the requested area are removed before skeletonization. A supplied `radius` map must match the image shape and contain finite nonnegative values. A supplied `confidence` map must match the image shape and contain values between zero and one.
+
+ ## Data model
+@@ -70,11 +76,13 @@ Pixel adjacency uses orthogonal neighbors and permits a diagonal neighbor only w
+ The public models are frozen. Graph and path collections are tuples, graph and path coordinate arrays are read-only, and inventory mappings are immutable.
+
+ - `SkeletonGraph` contains nodes and edges, with `component_count`, `cycle_count`, `endpoint_count`, and `junction_count` graph diagnostics.
++- `SkeletonAnalysis` contains owned read-only mask, skeleton, radius, and confidence arrays alongside the graph. Its graph diagnostics delegate to `SkeletonGraph`.
+ - `SkeletonNode` records its integer ID, `(x, y)` coordinate, degree, radius in pixels, and confidence.
+ - `SkeletonEdge` records endpoint node IDs, ordered `(x, y)` geometry, length in pixels, mean radius, and confidence.
+ - `TopologyRoute` records an ordered edge sequence, start and end node IDs, and route-level cycle count. Routes are undirected graph traversals with an explicit orientation for geometry assembly.
+ - `SkeletonPath` contains assembled route geometry, edge IDs, oriented endpoint IDs, length, measured confidence, route cycle count, and `PathScore`. It does not contain selection ambiguity flags.
+-- `PathScore` reports guide distance in pixels, ordered-endpoint error in pixels, measured confidence, expected-length error in pixels, and sampled turning cost in squared radians. Measurements that do not apply are `None`.
++- `SkeletonWalk` records each traversed edge ID and direction, including repeats, plus unique covered edge IDs, coverage and repetition counts, endpoints, geometry, and traversal length.
++- `PathScore` reports guide distance, ordered-endpoint error, endpoint-tangent error in degrees, measured confidence, expected-length error, and sampled turning cost in squared radians. Measurements that do not apply are `None`.
+ - `PathSelection` contains the selected `path`, whether a competing route is ambiguous, whether the same route has an ambiguous orientation, and `feasible_path_count`.
+ - `TopologyPathInventory` stores enumerated routes by the requested path kinds for reuse during ranking.
+
+@@ -102,12 +110,15 @@ The public models are frozen. Graph and path collections are tuples, graph and p
+ | `ambiguity_length_error_px` | 1.0 | Maximum expected-length-error difference treated as overlapping evidence |
+ | `ambiguity_turning_cost` | 0.1 | Turning-cost tolerance when turning is explicitly used as ambiguity evidence |
+ | `turning_cost_is_evidence` | `False` | Whether turning cost may reduce route ambiguity |
++| `ambiguity_endpoint_tangent_deg` | 15.0 | Maximum tangent-error difference treated as overlapping evidence |
++| `tangent_error_is_evidence` | `True` | Whether tangent error guides ranking and ambiguity |
++| `endpoint_tangents_are_hard` | `False` | Whether tangent errors outside the supplied tolerance exclude routes |
+
+-With `candidate_xy`, ranking compares symmetric guide distance first. Endpoint order breaks guide ties within `guide_tie_tolerance_px`, followed by measured confidence, expected-length error, turning cost, and edge IDs. The tie tolerance is applied directly. Guide distances are not rounded to decimal places. Without a guide, measured confidence is the primary score. Route confidence is the length-weighted mean of its edge confidences.
++With `candidate_xy`, ranking compares symmetric guide distance first. Endpoint order breaks guide ties within `guide_tie_tolerance_px`, followed by tangent error when enabled, measured confidence, expected-length error, turning cost, and edge IDs. Without a guide, enabled tangent error is considered before measured confidence. Endpoint tangent constraints are ranking evidence by default; `endpoint_tangents_are_hard=True` makes them feasibility constraints using `tangent_tolerance_deg`. Route confidence is the length-weighted mean of edge confidences.
+
+-Ambiguity compares score evidence using the configured tolerances. Turning cost is a deterministic ranking tie-breaker, but by default it does not make the selection appear more certain. Set `turning_cost_is_evidence=True` only when that interpretation is appropriate for the application. `ambiguous` concerns competing edge routes; `orientation_ambiguous` concerns reversed orientations of the selected route. Neither flag changes measured confidence.
++Ambiguity compares score evidence using the configured tolerances, including tangent error when enabled. Turning cost is a deterministic ranking tie-breaker, but by default it does not make the selection appear more certain. `ambiguous` concerns competing edge routes; `orientation_ambiguous` concerns reversed orientations of the selected route. Tangent or endpoint evidence can resolve orientation ambiguity, but neither the route nor its orientation establishes physical drawing direction.
+
+-Candidate geometry and `expected_endpoints` use `(x, y)` coordinates. Endpoint feasibility uses `endpoint_tolerance_px`, which defaults to three pixels. Candidate alignment or endpoint order does not establish physical drawing direction.
++Candidate geometry, `expected_endpoints`, and `expected_endpoint_tangents` use `(x, y)` coordinates or vectors. Endpoint feasibility uses `endpoint_tolerance_px`; tangent scoring uses `tangent_tolerance_deg` only when the ranking policy enables hard tangent constraints. Alignment and ordered orientation remain route evidence, not physical drawing direction.
+
+ ## Search limits and route inventories
+
+@@ -137,8 +148,8 @@ When either search limit is exceeded, `PathSearchLimitError` is raised rather th
+ The supported package-root exports are:
+
+ - Constants: `DEFAULT_MAX_PATHS`, `DEFAULT_RANKING_POLICY`, `DEFAULT_SEARCH_LIMITS`, `__version__`.
+-- Models and errors: `NoFeasiblePathError`, `PathRankingPolicy`, `PathScore`, `PathSearchLimitError`, `PathSearchLimits`, `PathSelection`, `SkeletonEdge`, `SkeletonGraph`, `SkeletonNode`, `SkeletonPath`, `TopologyPathInventory`, and `TopologyRoute`.
+-- Graph and image functions: `build_skeleton_graph`, `graph_from_mask`, `graph_from_skeleton`, and `prune_spurs`.
++- Models and errors: `DisconnectedGraphError`, `NoFeasiblePathError`, `PathRankingPolicy`, `PathScore`, `PathSearchLimitError`, `PathSearchLimits`, `PathSelection`, `SkeletonAnalysis`, `SkeletonEdge`, `SkeletonGraph`, `SkeletonImage`, `SkeletonNode`, `SkeletonPath`, `SkeletonWalk`, `TopologyPathInventory`, and `TopologyRoute`.
++- Graph and image functions: `analyze_mask`, `build_skeleton_graph`, `covering_walk`, `graph_from_mask`, `graph_from_skeleton`, and `prune_spurs`.
+ - Routing and ranking functions: `prepare_topology_paths`, `rank_paths`, and `select_path`.
+
+ `graph_from_skeleton()` is the lightweight entry point for pre-thinned images. `graph_from_mask()` uses the optional image dependencies. `build_skeleton_graph()` is the lower-level graph constructor and skeletonizes by default unless `already_skeleton=True`.
+diff --git a/docs/conf.py b/docs/conf.py
+index 6c9230c..7c2d943 100644
+--- a/docs/conf.py
++++ b/docs/conf.py
+@@ -41,7 +41,10 @@ napoleon_attr_annotations = True
+ autodoc_member_order = "bysource"
+ autodoc_typehints = "description"
+ nitpicky = True
+-nitpick_ignore = [("py:class", "numpy.typing.ArrayLike")]
++nitpick_ignore = [
++    ("py:class", "numpy.typing.ArrayLike"),
++    ("py:class", "numpy._typing._array_like.ArrayLike"),
++]
+
+ exclude_patterns = ["_build", "Thumbs.db", ".DS_Store", "README.md"]
+
+diff --git a/docs/getting-started.md b/docs/getting-started.md
+index 5c79ba5..c96112c 100644
+--- a/docs/getting-started.md
++++ b/docs/getting-started.md
+@@ -52,6 +52,49 @@ graph = graph_from_mask(mask)
+
+ This workflow requires the `image` extra. It skeletonizes the mask and, when `radius` is omitted, derives a Euclidean distance-transform radius from the mask. Component filtering is opt-in. In contrast, `graph_from_skeleton()` uses pre-thinned pixels directly, does not derive radius, and assigns zero radius values when no radius map is supplied.
+
++
++Use `analyze_mask()` when diagnostics need the normalized mask, read-only skeleton, radius, confidence, and graph together. It returns a `SkeletonAnalysis` with owned read-only array copies. Radius is sampled from the mask's Euclidean distance transform; default confidence is all-ones foreground evidence, not a probability.
++
++```python
++from skeletonpaths import analyze_mask
++
++analysis = analyze_mask(mask)
++analysis.skeleton
++analysis.radius
++analysis.graph
++analysis.mask
++analysis.confidence
++```
++
++
++The complete source-free mask example is maintained in `examples/`:
++
++```{literalinclude} ../examples/09_analyze_mask.py
++:language: python
++```
++
++For an edge-covering walk over one connected graph, pass optional graph node IDs to constrain its endpoints:
++
++```python
++from skeletonpaths import covering_walk
++
++walk = covering_walk(analysis.graph, start_node=0, end_node=1)
++walk.xy
++walk.edge_ids
++walk.edge_directions
++walk.covered_edge_ids
++walk.repeated_edge_count
++```
++
++
++`SkeletonPath` routes never repeat an edge. `SkeletonWalk` may repeat edges to cover a connected graph, and `covering_walk()` returns a deterministic traversal hypothesis, not physical pen order. Disconnected graphs raise `DisconnectedGraphError` rather than being joined silently.
++
++```{literalinclude} ../examples/10_covering_walk.py
++:language: python
++```
++
++A disconnected graph cannot be represented by one continuous walk. The API does not infer handwriting orientation or physical drawing order.
++
+ See {doc}`guide/graph-construction` for validation, dependency, and propagation details.
+
+ ## Inspect a selection
+diff --git a/docs/guide/ambiguity-and-ranking.md b/docs/guide/ambiguity-and-ranking.md
+index 1b06b9d..b65bbc1 100644
+--- a/docs/guide/ambiguity-and-ranking.md
++++ b/docs/guide/ambiguity-and-ranking.md
+@@ -7,7 +7,7 @@ Ranking orders feasible routes. Ambiguity describes whether the available score
+ When `candidate_xy` is supplied, the effective ranking order is:
+
+ 1. Symmetric guide distance.
+-2. For guide distances within `guide_tie_tolerance_px`, endpoint-order error.
++2. For guide distances within `guide_tie_tolerance_px`, endpoint-order error, then tangent error when enabled.
+ 3. Measured confidence.
+ 4. Expected-length error, when `expected_length_px` is supplied.
+ 5. Turning cost.
+@@ -19,16 +19,17 @@ Guide distances are grouped by direct numeric tolerance. They are not decimal-ro
+
+ Without `candidate_xy`, ranking considers:
+
+-1. Measured confidence.
+-2. Expected-length error, when `expected_length_px` is supplied.
+-3. Turning cost.
+-4. Deterministic route identity tie-breakers.
++1. Tangent error when enabled by policy.
++2. Measured confidence.
++3. Expected-length error, when `expected_length_px` is supplied.
++4. Turning cost.
++5. Deterministic route identity tie-breakers.
+
+ An absent expected length does not make shorter routes preferable. Turning cost normally helps deterministic ranking only. It reduces ambiguity only when {class}`skeletonpaths.PathRankingPolicy` `turning_cost_is_evidence=True`.
+
+ ## Scores and policy
+
+-{class}`skeletonpaths.PathScore` contains `guide_distance_px`, `endpoint_order_error_px`, `measured_confidence`, `length_error_px`, and `turning_cost`. Distance and length values are in pixels. Turning cost is sampled mean squared turn angle in squared radians. `None` means a score dimension was not applicable or requested, not zero.
++{class}`skeletonpaths.PathScore` contains `guide_distance_px`, `endpoint_order_error_px`, `endpoint_tangent_error_deg`, `measured_confidence`, `length_error_px`, and `turning_cost`. Distance and length values are in pixels; tangent error is in degrees. Turning cost is sampled mean squared turn angle in squared radians. `None` means a score dimension was not applicable or requested, not zero.
+
+ The default {class}`skeletonpaths.PathRankingPolicy` is:
+
+@@ -43,6 +44,9 @@ The default {class}`skeletonpaths.PathRankingPolicy` is:
+ | `ambiguity_length_error_px` | 1.0 |
+ | `ambiguity_turning_cost` | 0.1 |
+ | `turning_cost_is_evidence` | `False` |
++| `ambiguity_endpoint_tangent_deg` | 15.0 |
++| `tangent_error_is_evidence` | `True` |
++| `endpoint_tangents_are_hard` | `False` |
+
+ Guide tie tolerance controls ranking grouping. The ambiguity tolerances control overlap of score evidence. They are separate policy concepts.
+
+@@ -52,11 +56,11 @@ Guide tie tolerance controls ranking grouping. The ambiguity tolerances control
+
+ ## Route and orientation ambiguity
+
+-{class}`skeletonpaths.PathSelection` `ambiguous` is true when a different edge route has overlapping score evidence within the configured ambiguity tolerances. `orientation_ambiguous` is true when the reversed orientation of the same edge route remains indistinguishable within endpoint-order evidence. Both flags can be true at once.
++{class}`skeletonpaths.PathSelection` `ambiguous` is true when a different edge route has overlapping score evidence within the configured ambiguity tolerances. `orientation_ambiguous` is true when the reversed orientation of the same edge route remains indistinguishable within endpoint-order and enabled tangent evidence. Both flags can be true at once.
+
+ For example, suppose an upper and lower branch form distinct but equally scored edge routes. The selected edge route also has no ordered endpoint evidence to distinguish its forward and reversed geometry. The selection can then report both a competing-route ambiguity and an orientation ambiguity. Neither flag modifies {class}`skeletonpaths.SkeletonPath` `confidence`.
+
+-A candidate guide can help distinguish route geometry or route orientation. It remains ranking guidance, not a hard constraint or a statement of physical drawing direction.
++A candidate guide or endpoint tangent evidence can help distinguish route geometry or orientation. They remain generic ranking evidence, not claims about physical drawing direction. Tangents are ranking evidence by default; set `endpoint_tangents_are_hard=True` only when hard feasibility is explicitly wanted.
+
+ The equal-route and guide-disambiguation example is the canonical executable source:
+
+diff --git a/docs/guide/graph-construction.md b/docs/guide/graph-construction.md
+index 5659671..cda72f4 100644
+--- a/docs/guide/graph-construction.md
++++ b/docs/guide/graph-construction.md
+@@ -1,6 +1,6 @@
+ # Graph construction
+
+-SkeletonPaths turns a binary raster into an undirected topology graph. Raster indexing and public geometry use different conventions: arrays use `[row, column]`, while {class}`skeletonpaths.SkeletonNode` and {class}`skeletonpaths.SkeletonEdge` geometry, and later path coordinates, use `(x, y) = (column, row)` in pixel units.
++SkeletonPaths turns a binary raster into an undirected topology graph. Graph edges are evidence of raster connectivity, not directed strokes; their deterministic storage order is for geometry assembly and is not physical drawing order. Raster arrays use `[row, column]`, while {class}`skeletonpaths.SkeletonNode` and {class}`skeletonpaths.SkeletonEdge` geometry and later route coordinates use `(x, y) = (column, row)` in pixel units.
+
+ ## Accepted binary images
+
+@@ -17,16 +17,18 @@ Values are not interpreted as foreground merely because they are nonzero.
+
+ ## Mask versus pre-thinned skeleton
+
+-| Behavior | {func}`skeletonpaths.graph_from_skeleton` | {func}`skeletonpaths.graph_from_mask` |
++| Behavior | {func}`skeletonpaths.graph_from_skeleton` | {func}`skeletonpaths.graph_from_mask` / {func}`skeletonpaths.analyze_mask` |
+ | --- | --- | --- |
+ | Input already thinned | Yes | No |
+ | Skeletonization | No | Yes |
+ | Automatic radius | No. Radius is zero if absent. | Yes. Uses a Euclidean distance transform if absent. |
+ | Component filtering | No | Optional `min_component_area`, before skeletonization |
+ | Image extra | Not required | Required for mask processing |
++For {func}`skeletonpaths.graph_from_mask`, component filtering labels 8-neighbor mask components and removes components smaller than the requested area. The default `min_component_area=0` keeps every component. SciPy is needed to derive radius for a nonempty mask or when filtering is enabled. scikit-image is needed to skeletonize. Imports are lazy. Supplying a radius map avoids automatic radius derivation, but does not remove the skeletonization dependency.
+
+-For {func}`skeletonpaths.graph_from_mask`, component filtering labels 8-neighbor mask components and removes components smaller than the requested area. The default `min_component_area=0` keeps every component. SciPy is needed when automatic radius is requested or filtering is enabled. scikit-image is needed to skeletonize. Imports are lazy. Supplying a radius map avoids automatic radius derivation, but does not remove the skeletonization dependency.
+
++
++`analyze_mask()` applies the same processing and returns a frozen `SkeletonAnalysis` containing owned read-only copies of the normalized mask, skeleton, radius, and confidence arrays, together with the graph. `graph_from_mask()` is the graph-only shortcut. Empty masks produce an empty graph and skeleton with a zero radius map.
+ {func}`skeletonpaths.graph_from_skeleton` assumes the input is already thinned. It does not infer radius from surrounding ink and can run without SciPy or scikit-image. {func}`skeletonpaths.build_skeleton_graph` is the lower-level constructor. With `already_skeleton=False` it skeletonizes and lazily imports scikit-image; with `already_skeleton=True` it uses the pixels directly. It does not derive a distance-transform radius.
+
+ ## Pixel adjacency
+@@ -41,7 +43,10 @@ Orthogonal foreground neighbors connect. A diagonal pair connects only when neit
+ - Adjacent junction pixels remain separate nodes.
+ - Edge length is the assembled polyline length in pixels.
+
+-Edge geometry is ordered from endpoint node `a` to endpoint node `b`. This ordering supports geometry assembly and ranking; it does not imply physical drawing direction.
++Edge geometry is stored from endpoint node `a` to node `b`. This deterministic storage orientation supports geometry assembly and ranking; it does not imply physical drawing direction or traversal order.
++
++
++`SkeletonPath` represents a connected candidate route with unique edge IDs. `SkeletonWalk` is separate and may repeat edge IDs in its ordered traversal. `covering_walk()` provides a deterministic connected traversal hypothesis and raises `DisconnectedGraphError` for disconnected graphs.
+
+ ## Spur pruning
+
+@@ -61,7 +66,7 @@ A supplied `radius` map must match the image shape, contain finite values, and b
+ - An edge's mean radius and confidence are means over its edge-chain pixels.
+ - A path's measured confidence is the edge-length-weighted mean of its edge confidences.
+
+-When no confidence map is supplied, confidence defaults to one. When no radius map is supplied to the pre-thinned entry point, radius defaults to zero. Mask input instead derives radius automatically unless a radius map is provided.
++When no confidence map is supplied, analysis returns an all-ones confidence map as generic foreground evidence, not a probability of route correctness. Graph nodes and edges therefore receive confidence one by default. When no radius map is supplied to the pre-thinned entry point, radius defaults to zero. Mask input derives radius automatically unless a radius map is provided.
+
+ The mask and confidence example is maintained in `examples/` and included here without copying its source:
+
+@@ -69,6 +74,11 @@ The mask and confidence example is maintained in `examples/` and included here w
+ :language: python
+ ```
+
++
++```{literalinclude} ../../examples/09_analyze_mask.py
++:language: python
++```
++
+ ## Graph diagnostics
+
+ {class}`skeletonpaths.SkeletonGraph` exposes graph-level `component_count`, `cycle_count`, `endpoint_count`, and `junction_count`. The graph cycle diagnostic is the cyclomatic count `max(0, |E| - |V| + component_count)`. It describes the whole graph, not a route. See {doc}`path-selection` for route-level cycle constraints.
+diff --git a/docs/guide/path-selection.md b/docs/guide/path-selection.md
+index dbeea59..84e6ded 100644
+--- a/docs/guide/path-selection.md
++++ b/docs/guide/path-selection.md
+@@ -1,6 +1,6 @@
+ # Path selection
+
+-Graph construction supplies an undirected topology. Route enumeration produces connected edge sequences, and ranking evaluates only routes that satisfy the requested feasibility constraints. Ordered path geometry is useful for measurement and ranking, but does not establish physical direction.
++Graph construction supplies undirected topology. Graph edges and their storage order are raster evidence, not drawing order. `SkeletonPath` is a connected route with unique edge IDs. `SkeletonWalk` is a different model for ordered graph traversal and may repeat edges. Neither model claims physical pen direction.
+
+ ## Route kinds
+
+@@ -24,6 +24,9 @@ Graph construction supplies an undirected topology. Route enumeration produces c
+
+ A `candidate_xy` guide affects ranking, not feasibility. It cannot rescue a route that fails a hard endpoint or topology constraint. Candidate and expected endpoint coordinates use `(x, y)` pixel units. A guide must be a finite `(N, 2)` array with at least two distinct points. Symmetric guide distance measures geometric alignment; endpoint-order error can help resolve orientation when guide geometry ties. Guide geometry is not evidence of physical direction.
+
++
++`expected_endpoint_tangents=(start, end)` supplies optional ordered xy direction vectors. Tangent error is ranking evidence by default and is included in ambiguity analysis. Set `PathRankingPolicy(endpoint_tangents_are_hard=True)` to filter routes outside `tangent_tolerance_deg`; the default is a 35-degree tolerance. Tangents are estimated from separated endpoint samples because raster endpoints can be noisy.
++
+ The hard-endpoint versus misleading-guide behavior is demonstrated by the canonical example:
+
+ ```{literalinclude} ../../examples/03_guided_branch_selection.py
+diff --git a/docs/index.md b/docs/index.md
+index 0f90a3e..fe39cb4 100644
+--- a/docs/index.md
++++ b/docs/index.md
+@@ -9,7 +9,7 @@ SkeletonPaths accepts images indexed as `[row, column]`, but all public geometri
+ | Input | Entry point | Installation |
+ | --- | --- | --- |
+ | Already-thinned skeleton | {func}`skeletonpaths.graph_from_skeleton` | Base package |
+-| Binary ink mask | {func}`skeletonpaths.graph_from_mask` | `skeletonpaths[image]` |
++| Binary ink mask | {func}`skeletonpaths.graph_from_mask` or {func}`skeletonpaths.analyze_mask` | `skeletonpaths[image]` |
+
+ ```python
+ import numpy as np
+diff --git a/docs/reference/api.md b/docs/reference/api.md
+index 0f263e1..470194f 100644
+--- a/docs/reference/api.md
++++ b/docs/reference/api.md
+@@ -20,6 +20,16 @@ The package root, `skeletonpaths`, is the supported import surface. The explicit
+ .. autofunction:: skeletonpaths.prune_spurs
+ ```
+
++## Mask analysis and edge covering
++
++```{eval-rst}
++.. autofunction:: skeletonpaths.analyze_mask
++```
++
++```{eval-rst}
++.. autofunction:: skeletonpaths.covering_walk
++```
++
+ ## Route enumeration, ranking, and selection
+
+ ```{eval-rst}
+@@ -48,6 +58,19 @@ The package root, `skeletonpaths`, is the supported import surface. The explicit
+ .. autoclass:: skeletonpaths.SkeletonGraph
+ ```
+
++
++```{eval-rst}
++.. autoclass:: skeletonpaths.SkeletonAnalysis
++```
++
++```{eval-rst}
++.. autoclass:: skeletonpaths.SkeletonImage
++```
++
++```{eval-rst}
++.. autoclass:: skeletonpaths.SkeletonWalk
++```
++
+ ```{eval-rst}
+ .. autoclass:: skeletonpaths.TopologyRoute
+ ```
+@@ -94,6 +117,10 @@ The package root, `skeletonpaths`, is the supported import surface. The explicit
+
+ ## Errors
+
++```{eval-rst}
++.. autoclass:: skeletonpaths.DisconnectedGraphError
++```
++
+ ```{eval-rst}
+ .. autoclass:: skeletonpaths.NoFeasiblePathError
+ ```
+diff --git a/docs/reference/behavior-contracts.md b/docs/reference/behavior-contracts.md
+index beab3bf..d81b40a 100644
+--- a/docs/reference/behavior-contracts.md
++++ b/docs/reference/behavior-contracts.md
+@@ -4,17 +4,20 @@ This page collects concise integration guarantees. See the {doc}`../guide/graph-
+
+ ## Coordinates and topology
+
+-Raster arrays use `[row, column]` indexing. Public geometry uses `(x, y) = (column, row)` in pixel units. Graph topology is undirected. Route start/end order exists for geometry assembly and ranking, not as evidence of physical drawing direction.
++Raster arrays use `[row, column]` indexing. Public geometry uses `(x, y) = (column, row)` in pixel units. Graph topology and edges are undirected evidence; deterministic node, edge, and endpoint storage order supports geometry assembly, not physical drawing order. `SkeletonPath` is a connected candidate route without repeated edge IDs. `SkeletonWalk` is an ordered traversal that may repeat edges to cover a connected graph.
+
+ {class}`skeletonpaths.SkeletonGraph` `cycle_count` is graph-level. {class}`skeletonpaths.TopologyRoute` and {class}`skeletonpaths.SkeletonPath` `cycle_count` values are route-level. `expected_cycles` constrains the route being considered, not every component of the graph.
+
+ ## Immutability
+
+-Public models are frozen. Graph node and edge collections are tuples. {class}`skeletonpaths.SkeletonEdge` `xy` and {class}`skeletonpaths.SkeletonPath` `xy` arrays are read-only. A {class}`skeletonpaths.TopologyPathInventory` exposes an immutable mapping whose route collections are tuples.
++Public models are frozen. Graph node and edge collections are tuples. {class}`skeletonpaths.SkeletonEdge` and {class}`skeletonpaths.SkeletonPath` coordinate arrays are read-only. `SkeletonAnalysis` owns read-only mask, skeleton, radius, and confidence arrays. A {class}`skeletonpaths.TopologyPathInventory` exposes an immutable mapping whose route collections are tuples.
++
++
++`SkeletonWalk.xy` is read-only. `edge_ids` and `edge_directions` record every traversal in order, including repeats; `covered_edge_ids` is the sorted unique edge set, `repeated_edge_count` counts traversals beyond first coverage, and `length_px` includes repeats. `covering_walk()` is a deterministic traversal hypothesis for one connected graph. It honors requested endpoints, selects omitted endpoints deterministically, and raises `DisconnectedGraphError` rather than silently joining components.
+
+ ## Empty input
+
+-An empty skeleton is valid and produces an empty {class}`skeletonpaths.SkeletonGraph`.
++An empty skeleton is valid and produces an empty `SkeletonGraph`. `analyze_mask()` returns matching empty mask and skeleton arrays, a zero-radius map, all-ones confidence evidence, and that graph.
+
+ ## Validation
+
+@@ -22,12 +25,13 @@ An empty skeleton is valid and produces an empty {class}`skeletonpaths.SkeletonG
+ - Radius maps match the image shape and contain finite, nonnegative values.
+ - Confidence maps match the image shape and contain finite values in `[0, 1]`.
+ - Candidate geometry is finite `(N, 2)` data with at least two distinct `(x, y)` points.
++- Endpoint tangent vectors are finite nonzero xy vectors. Tangent tolerance is between zero and 180 degrees; tangent constraints rank routes by default and become hard feasibility constraints only when the policy opts in.
+ - Ranking policies and search limits validate their sample counts, tolerances, and bounds.
+ - Invalid inputs raise `ValueError` or `TypeError` as appropriate. Image-only dependency failures are raised lazily by the operations that need those dependencies.
+
+ ## Determinism and stability
+
+-Traversal and tie-breakers are deterministic for a fixed package version, input, and policy. The pre-1.0 project does not promise identical ordering across versions. Public APIs may change in minor releases before 1.0.
++Traversal and tie-breakers are deterministic for a fixed package version, input, and policy. The default closed-graph walk start is the lexicographically smallest `(x, y, id)` node. The pre-1.0 project does not promise identical ordering across versions. Public APIs may change in minor releases before 1.0.
+
+ ## Deprecated names
+
+diff --git a/examples/09_analyze_mask.py b/examples/09_analyze_mask.py
+new file mode 100644
+index 0000000..3d19b0e
+--- /dev/null
++++ b/examples/09_analyze_mask.py
+@@ -0,0 +1,25 @@
++"""Inspect skeleton, radius, confidence, and graph results from a binary mask."""
++
++import numpy as np
++
++from skeletonpaths import SkeletonAnalysis, analyze_mask
++
++
++def main() -> None:
++    mask = np.zeros((24, 28), dtype=bool)
++    mask[10:14, 3:25] = True
++
++    analysis = analyze_mask(mask)
++    assert isinstance(analysis, SkeletonAnalysis)
++    assert not analysis.mask.flags.writeable
++    assert not analysis.skeleton.flags.writeable
++    assert not analysis.radius.flags.writeable
++    assert not analysis.confidence.flags.writeable
++
++    print(f"components: {analysis.component_count}")
++    print(f"endpoints: {analysis.endpoint_count}")
++    print(f"maximum radius: {analysis.radius.max():.1f}px")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/examples/10_covering_walk.py b/examples/10_covering_walk.py
+new file mode 100644
+index 0000000..f6b049e
+--- /dev/null
++++ b/examples/10_covering_walk.py
+@@ -0,0 +1,36 @@
++"""Build a deterministic graph-covering traversal from an analyzed mask."""
++
++import numpy as np
++
++from skeletonpaths import analyze_mask, covering_walk
++
++
++def main() -> None:
++    mask = np.zeros((18, 24), dtype=bool)
++    mask[2:10, 10:13] = True
++    mask[7:10, 3:21] = True
++    analysis = analyze_mask(mask)
++
++    endpoints = sorted(
++        (node for node in analysis.graph.nodes if node.degree == 1),
++        key=lambda node: (node.xy[0], node.xy[1], node.id),
++    )
++    walk = covering_walk(
++        analysis.graph,
++        start_node=endpoints[0].id,
++        end_node=endpoints[-1].id,
++    )
++
++    assert walk.covered_edge_count == len(analysis.graph.edges)
++    assert set(walk.covered_edge_ids) == set(range(len(analysis.graph.edges)))
++    assert walk.length_px >= sum(
++        analysis.graph.edges[edge_id].length_px for edge_id in walk.covered_edge_ids
++    )
++
++    print(f"traversed edges: {walk.edge_ids}")
++    print(f"edge directions: {walk.edge_directions}")
++    print(f"repeated traversals: {walk.repeated_edge_count}")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/pyproject.toml b/pyproject.toml
+index 9ae474c..d56ae37 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -86,4 +86,7 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
+
+
+ [tool.ruff.format]
+-exclude = ["skeletonpaths_docs_implementation_brief.md"]
++exclude = [
++  "skeletonpaths_docs_implementation_brief.md",
++  "02_skeletonpaths_directed_walk_support.md",
++]
+diff --git a/skeletonpaths/__init__.py b/skeletonpaths/__init__.py
+index d6f0102..8be1128 100644
+--- a/skeletonpaths/__init__.py
++++ b/skeletonpaths/__init__.py
+@@ -8,19 +8,25 @@ from .core import (
+     DEFAULT_MAX_PATHS,
+     DEFAULT_RANKING_POLICY,
+     DEFAULT_SEARCH_LIMITS,
++    DisconnectedGraphError,
+     NoFeasiblePathError,
+     PathRankingPolicy,
+     PathScore,
+     PathSearchLimitError,
+     PathSearchLimits,
+     PathSelection,
++    SkeletonAnalysis,
+     SkeletonEdge,
+     SkeletonGraph,
++    SkeletonImage,
+     SkeletonNode,
+     SkeletonPath,
++    SkeletonWalk,
+     TopologyPathInventory,
+     TopologyRoute,
++    analyze_mask,
+     build_skeleton_graph,
++    covering_walk,
+     graph_from_mask,
+     graph_from_skeleton,
+     prepare_topology_paths,
+@@ -40,20 +46,26 @@ __all__ = [
+     "DEFAULT_MAX_PATHS",
+     "DEFAULT_RANKING_POLICY",
+     "DEFAULT_SEARCH_LIMITS",
++    "DisconnectedGraphError",
+     "NoFeasiblePathError",
+     "PathRankingPolicy",
+     "PathScore",
+-    "PathSelection",
+     "PathSearchLimitError",
+     "PathSearchLimits",
++    "PathSelection",
++    "SkeletonAnalysis",
+     "SkeletonEdge",
+     "SkeletonGraph",
++    "SkeletonImage",
+     "SkeletonNode",
+     "SkeletonPath",
+-    "TopologyRoute",
++    "SkeletonWalk",
+     "TopologyPathInventory",
++    "TopologyRoute",
+     "__version__",
++    "analyze_mask",
+     "build_skeleton_graph",
++    "covering_walk",
+     "graph_from_mask",
+     "graph_from_skeleton",
+     "prepare_topology_paths",
+diff --git a/skeletonpaths/core.py b/skeletonpaths/core.py
+index 6345862..a570508 100644
+--- a/skeletonpaths/core.py
++++ b/skeletonpaths/core.py
+@@ -1,7 +1,7 @@
+ """Compatibility re-exports for the internal SkeletonPaths modules."""
+
+ from .graph import build_skeleton_graph, graph_from_skeleton, prune_spurs
+-from .image import graph_from_mask
++from .image import analyze_mask, graph_from_mask
+ from .model import (
+     DEFAULT_MAX_PATHS,
+     DEFAULT_RANKING_POLICY,
+@@ -12,33 +12,43 @@ from .model import (
+     PathSearchLimitError,
+     PathSearchLimits,
+     PathSelection,
++    SkeletonAnalysis,
+     SkeletonEdge,
+     SkeletonGraph,
++    SkeletonImage,
+     SkeletonNode,
+     SkeletonPath,
++    SkeletonWalk,
+     TopologyPathInventory,
+     TopologyRoute,
+ )
+ from .ranking import rank_paths, rank_topology_paths, select_path, select_topology_path
+ from .routing import prepare_topology_paths
++from .walk import DisconnectedGraphError, covering_walk
+
+ __all__ = [
+     "DEFAULT_MAX_PATHS",
+     "DEFAULT_RANKING_POLICY",
+     "DEFAULT_SEARCH_LIMITS",
++    "DisconnectedGraphError",
+     "NoFeasiblePathError",
+     "PathRankingPolicy",
+     "PathScore",
+     "PathSearchLimitError",
+     "PathSearchLimits",
+     "PathSelection",
++    "SkeletonAnalysis",
+     "SkeletonEdge",
+     "SkeletonGraph",
++    "SkeletonImage",
+     "SkeletonNode",
+     "SkeletonPath",
++    "SkeletonWalk",
+     "TopologyPathInventory",
+     "TopologyRoute",
++    "analyze_mask",
+     "build_skeleton_graph",
++    "covering_walk",
+     "graph_from_mask",
+     "graph_from_skeleton",
+     "prepare_topology_paths",
+diff --git a/skeletonpaths/image.py b/skeletonpaths/image.py
+index f5447ff..5718283 100644
+--- a/skeletonpaths/image.py
++++ b/skeletonpaths/image.py
+@@ -1,19 +1,21 @@
++from __future__ import annotations
++
+ import numpy as np
+ from numpy.typing import ArrayLike
+
+-from .graph import _binary_image, build_skeleton_graph
+-from .model import SkeletonGraph
++from .graph import _binary_image, graph_from_skeleton, prune_spurs
++from .model import SkeletonAnalysis, SkeletonGraph
+
+
+-def graph_from_mask(
++def analyze_mask(
+     mask: ArrayLike,
+     *,
+     min_spur_length: float = 0.0,
+     radius: ArrayLike | None = None,
+     confidence: ArrayLike | None = None,
+     min_component_area: int = 0,
+-) -> SkeletonGraph:
+-    """Skeletonize a binary mask and build its topology graph.
++) -> SkeletonAnalysis:
++    """Skeletonize a binary mask and return its raster data and topology.
+
+     Parameters
+     ----------
+@@ -25,19 +27,19 @@ def graph_from_mask(
+         threshold, in pixels. Zero preserves all spurs.
+     radius : numpy.typing.ArrayLike or None
+         Optional finite, nonnegative radius map matching ``mask``. If omitted,
+-        derive radius from the mask with a Euclidean distance transform.
++        derive radius from the foreground with a Euclidean distance transform.
+     confidence : numpy.typing.ArrayLike or None
+         Optional finite confidence map matching ``mask`` with values in
+-        ``[0, 1]``. If omitted, confidence values are one.
++        ``[0, 1]``. If omitted, the analysis confidence map is all ones.
++        These values are generic evidence, not a probability.
+     min_component_area : int
+         Remove 8-neighbor mask components smaller than this pixel area before
+         skeletonization. Zero keeps every component.
+
+     Returns
+     -------
+-    SkeletonGraph
+-        Immutable topology graph with public coordinates in ``(x, y) =
+-        (column, row)`` pixel units.
++    SkeletonAnalysis
++        Owned read-only mask, skeleton, radius, and confidence arrays alongside the topology graph.
+
+     Raises
+     ------
+@@ -50,17 +52,10 @@ def graph_from_mask(
+     Notes
+     -----
+     Component filtering occurs before skeletonization and uses 8-neighbor
+-    component labeling. SciPy is required when ``radius`` is omitted and when
+-    ``min_component_area`` is positive. Skeletonization requires scikit-image.
+-    These dependencies are imported lazily. Use ``graph_from_skeleton()`` for
+-    pre-thinned input without image-processing dependencies.
+-
+-    See Also
+-    --------
+-    graph_from_skeleton : Build a graph from an already-thinned skeleton.
+-    build_skeleton_graph : Lower-level graph constructor.
++    component labeling. SciPy is required when radius is omitted for nonempty
++    masks and when ``min_component_area`` is positive. Skeletonization requires
++    scikit-image. These dependencies are imported lazily.
+     """
+-
+     source = _binary_image(mask, name="mask")
+     if (
+         isinstance(min_component_area, bool)
+@@ -80,18 +75,72 @@ def graph_from_mask(
+         keep = areas >= min_component_area
+         keep[0] = False
+         source = keep[labels]
++
++    radius_map: np.ndarray
+     if radius is None:
+-        try:
+-            from scipy.ndimage import distance_transform_edt
+-        except ImportError as error:
+-            raise ImportError(
+-                "automatic mask radius requires SciPy; install skeletonpaths[image]"
+-            ) from error
+-        radius = distance_transform_edt(source)
+-    return build_skeleton_graph(
+-        source,
+-        min_spur_length_px=min_spur_length,
++        if source.any():
++            try:
++                from scipy.ndimage import distance_transform_edt
++            except ImportError as error:
++                raise ImportError(
++                    "automatic mask radius requires SciPy; install skeletonpaths[image]"
++                ) from error
++            radius_map = distance_transform_edt(source)
++        else:
++            radius_map = np.zeros(source.shape, dtype=float)
++    else:
++        radius_map = np.asarray(radius, dtype=float)
++        if (
++            radius_map.shape != source.shape
++            or not np.isfinite(radius_map).all()
++            or np.any(radius_map < 0.0)
++        ):
++            raise ValueError("radius map must be finite, nonnegative, and match observed ink")
++
++    if confidence is None:
++        confidence_map = np.ones(source.shape, dtype=float)
++    else:
++        confidence_map = np.asarray(confidence, dtype=float)
++        if (
++            confidence_map.shape != source.shape
++            or not np.isfinite(confidence_map).all()
++            or np.any((confidence_map < 0.0) | (confidence_map > 1.0))
++        ):
++            raise ValueError("confidence map must be between zero and one and match observed ink")
++
++    try:
++        from skimage.morphology import skeletonize
++    except ImportError as error:
++        raise ImportError(
++            "skeletonizing observed ink requires scikit-image; install skeletonpaths[image]"
++        ) from error
++    skeleton = prune_spurs(skeletonize(source), min_spur_length)
++    graph = graph_from_skeleton(skeleton, radius=radius_map, confidence=confidence_map)
++    return SkeletonAnalysis(
++        mask=source,
++        skeleton=skeleton,
++        radius=radius_map,
++        confidence=confidence_map,
++        graph=graph,
++    )
++
++
++def graph_from_mask(
++    mask: ArrayLike,
++    *,
++    min_spur_length: float = 0.0,
++    radius: ArrayLike | None = None,
++    confidence: ArrayLike | None = None,
++    min_component_area: int = 0,
++) -> SkeletonGraph:
++    """Skeletonize a binary mask and build its topology graph.
++
++    Use :func:`analyze_mask` when the skeleton and radius arrays are also needed.
++    """
++    return analyze_mask(
++        mask,
++        min_spur_length=min_spur_length,
+         radius=radius,
+         confidence=confidence,
+-        already_skeleton=False,
+-    )
++        min_component_area=min_component_area,
++    ).graph
+diff --git a/skeletonpaths/model.py b/skeletonpaths/model.py
+index a490e13..5e24e56 100644
+--- a/skeletonpaths/model.py
++++ b/skeletonpaths/model.py
+@@ -194,6 +194,244 @@ class SkeletonGraph:
+         return sum(node.degree > 2 for node in self.nodes)
+
+
++@dataclass(frozen=True)
++class SkeletonImage:
++    """Compatibility base model for skeleton, radius, and topology results.
++
++    :class:`SkeletonAnalysis` extends this model with the analyzed mask and
++    confidence arrays and is returned by :func:`analyze_mask`.
++    """
++
++    skeleton: np.ndarray
++    radius: np.ndarray
++    graph: SkeletonGraph
++
++    def __post_init__(self) -> None:
++        skeleton = np.asarray(self.skeleton)
++        if skeleton.ndim != 2:
++            raise ValueError("skeleton must be a two-dimensional binary image")
++        if not np.issubdtype(skeleton.dtype, np.bool_) and (
++            not np.issubdtype(skeleton.dtype, np.number)
++            or not np.isfinite(skeleton).all()
++            or np.any((skeleton != 0) & (skeleton != 1))
++        ):
++            raise ValueError("skeleton must be a two-dimensional binary image")
++        skeleton = np.array(skeleton, dtype=bool, copy=True)
++        radius = np.asarray(self.radius, dtype=float)
++        if radius.shape != skeleton.shape or not np.isfinite(radius).all() or np.any(radius < 0.0):
++            raise ValueError("radius must be finite, nonnegative, and match the skeleton")
++        if not isinstance(self.graph, SkeletonGraph):
++            raise TypeError("graph must be a SkeletonGraph")
++        radius = np.array(radius, copy=True)
++        skeleton.setflags(write=False)
++        radius.setflags(write=False)
++        object.__setattr__(self, "skeleton", skeleton)
++        object.__setattr__(self, "radius", radius)
++
++
++@dataclass(frozen=True, init=False)
++class SkeletonAnalysis(SkeletonImage):
++    """Immutable result of analyzing a binary mask.
++
++    ``mask``, ``skeleton``, ``radius``, and ``confidence`` are owned read-only
++    arrays. Confidence is generic foreground evidence, not a probability that
++    any graph route or traversal is correct.
++    """
++
++    mask: np.ndarray
++    confidence: np.ndarray
++
++    def __init__(
++        self,
++        mask: np.ndarray,
++        skeleton: np.ndarray,
++        radius: np.ndarray,
++        confidence: np.ndarray,
++        graph: SkeletonGraph,
++    ) -> None:
++        object.__setattr__(self, "mask", mask)
++        object.__setattr__(self, "skeleton", skeleton)
++        object.__setattr__(self, "radius", radius)
++        object.__setattr__(self, "confidence", confidence)
++        object.__setattr__(self, "graph", graph)
++        self.__post_init__()
++
++    def __post_init__(self) -> None:
++        SkeletonImage.__post_init__(self)
++        mask = np.asarray(self.mask)
++        if mask.ndim != 2 or mask.shape != self.skeleton.shape:
++            raise ValueError("mask must be two-dimensional and match the skeleton")
++        if not np.issubdtype(mask.dtype, np.bool_) and (
++            not np.issubdtype(mask.dtype, np.number)
++            or not np.isfinite(mask).all()
++            or np.any((mask != 0) & (mask != 1))
++        ):
++            raise ValueError("mask must be a two-dimensional binary image")
++        confidence = np.asarray(self.confidence, dtype=float)
++        if (
++            confidence.shape != mask.shape
++            or not np.isfinite(confidence).all()
++            or np.any((confidence < 0.0) | (confidence > 1.0))
++        ):
++            raise ValueError("confidence must be finite, between zero and one, and match the mask")
++        mask = np.array(mask, dtype=bool, copy=True)
++        confidence = np.array(confidence, dtype=float, copy=True)
++        mask.setflags(write=False)
++        confidence.setflags(write=False)
++        object.__setattr__(self, "mask", mask)
++        object.__setattr__(self, "confidence", confidence)
++
++    @property
++    def component_count(self) -> int:
++        return self.graph.component_count
++
++    @property
++    def endpoint_count(self) -> int:
++        return self.graph.endpoint_count
++
++    @property
++    def junction_count(self) -> int:
++        return self.graph.junction_count
++
++    @property
++    def cycle_count(self) -> int:
++        return self.graph.cycle_count
++
++
++@dataclass(frozen=True)
++class SkeletonWalk:
++    """Immutable ordered traversal that may repeat graph edges.
++
++    Coordinates, edge IDs, and directions describe a traversal hypothesis, not
++    physical drawing direction. Graph-dependent invariants are checked against
++    the source graph by :func:`covering_walk`.
++    """
++
++    xy: np.ndarray
++    edge_ids: tuple[int, ...]
++    edge_directions: tuple[Literal["forward", "reverse"], ...]
++    start_node: int | None
++    end_node: int | None
++    covered_edge_ids: tuple[int, ...]
++    covered_edge_count: int
++    total_edge_count: int
++    repeated_edge_count: int
++    length_px: float
++
++    def __post_init__(self) -> None:
++        points = np.asarray(self.xy, dtype=float)
++        if points.ndim != 2 or points.shape[1] != 2 or not np.isfinite(points).all():
++            raise ValueError("walk coordinates must have shape (N, 2) and be finite")
++        edge_ids = tuple(self.edge_ids)
++        if any(
++            isinstance(edge_id, bool) or not isinstance(edge_id, (int, np.integer)) or edge_id < 0
++            for edge_id in edge_ids
++        ):
++            raise ValueError("walk edge IDs must be nonnegative integers")
++        edge_ids = tuple(int(edge_id) for edge_id in edge_ids)
++        directions = tuple(self.edge_directions)
++        if len(directions) != len(edge_ids) or any(
++            direction not in {"forward", "reverse"} for direction in directions
++        ):
++            raise ValueError("walk directions must match the edge traversal sequence")
++        covered_edge_ids = tuple(self.covered_edge_ids)
++        expected_covered = tuple(sorted(set(edge_ids)))
++        if covered_edge_ids != expected_covered:
++            raise ValueError("covered edge IDs must be the sorted unique traversed edge IDs")
++        if any(
++            isinstance(edge_id, bool) or not isinstance(edge_id, (int, np.integer)) or edge_id < 0
++            for edge_id in covered_edge_ids
++        ):
++            raise ValueError("covered edge IDs must be nonnegative integers")
++        counts = (self.covered_edge_count, self.total_edge_count, self.repeated_edge_count)
++        if any(
++            isinstance(count, bool) or not isinstance(count, (int, np.integer)) or count < 0
++            for count in counts
++        ):
++            raise ValueError("walk edge counts must be nonnegative integers")
++        covered_count, total_count, repeated_count = (int(count) for count in counts)
++        if (
++            covered_count != len(covered_edge_ids)
++            or covered_count != total_count
++            or covered_edge_ids != tuple(range(total_count))
++            or repeated_count != len(edge_ids) - covered_count
++        ):
++            raise ValueError("walk edge coverage counts are inconsistent")
++        if (self.start_node is None) != (self.end_node is None):
++            raise ValueError("walk start and end nodes must both be set or both be None")
++        if self.start_node is not None and any(
++            isinstance(node, bool) or not isinstance(node, (int, np.integer)) or node < 0
++            for node in (self.start_node, self.end_node)
++        ):
++            raise ValueError("walk endpoints must be nonnegative integer node IDs")
++        if not np.isfinite(self.length_px) or self.length_px < 0.0:
++            raise ValueError("walk length must be finite and nonnegative")
++        geometry_length = float(np.linalg.norm(np.diff(points, axis=0), axis=1).sum())
++        if not np.isclose(self.length_px, geometry_length, rtol=1e-6, atol=1e-9):
++            raise ValueError("walk length must match its traversal geometry")
++        if edge_ids:
++            if self.start_node is None or len(points) < 2:
++                raise ValueError("an edge-covering walk must include endpoints and geometry")
++        elif self.start_node is None:
++            if len(points) != 0 or total_count != 0:
++                raise ValueError("an empty graph walk must have no coordinates or edges")
++        elif len(points) != 1 or self.start_node != self.end_node or total_count != 0:
++            raise ValueError("a walk without edges must represent one isolated node")
++        points = np.array(points, copy=True)
++        points.setflags(write=False)
++        object.__setattr__(self, "xy", points)
++        object.__setattr__(self, "edge_ids", edge_ids)
++        object.__setattr__(self, "edge_directions", directions)
++        object.__setattr__(self, "covered_edge_ids", expected_covered)
++        object.__setattr__(self, "covered_edge_count", covered_count)
++        object.__setattr__(self, "total_edge_count", total_count)
++        object.__setattr__(self, "repeated_edge_count", repeated_count)
++        object.__setattr__(self, "length_px", float(self.length_px))
++        if self.start_node is not None:
++            object.__setattr__(self, "start_node", int(self.start_node))
++            assert self.end_node is not None
++            object.__setattr__(self, "end_node", int(self.end_node))
++
++    def _validate_graph(self, graph: SkeletonGraph) -> None:
++        if self.total_edge_count != len(graph.edges):
++            raise ValueError("walk total edge count does not match its graph")
++        node_by_id = {node.id: node for node in graph.nodes}
++        if self.start_node is None:
++            if graph.nodes or graph.edges:
++                raise ValueError("empty walk does not match a nonempty graph")
++            return
++        if self.start_node not in node_by_id or self.end_node not in node_by_id:
++            raise ValueError("walk endpoint references an unknown graph node")
++        if not self.edge_ids:
++            if self.start_node != self.end_node or not np.allclose(
++                self.xy[0], node_by_id[self.start_node].xy
++            ):
++                raise ValueError("walk without edges must match its isolated graph node")
++            return
++        current = self.start_node
++        expected_points = [np.asarray(node_by_id[current].xy, dtype=float)]
++        for edge_id, direction in zip(self.edge_ids, self.edge_directions, strict=True):
++            if edge_id >= len(graph.edges):
++                raise ValueError("walk references an unknown graph edge")
++            edge = graph.edges[edge_id]
++            if direction == "forward" and edge.a == current:
++                current = edge.b
++                edge_points = edge.xy
++            elif direction == "reverse" and edge.b == current:
++                current = edge.a
++                edge_points = edge.xy[::-1]
++            else:
++                raise ValueError("walk edge directions are not connected in sequence")
++            expected_points.extend(edge_points[1:])
++        if current != self.end_node:
++            raise ValueError("walk end node does not match its traversal")
++        if not np.allclose(self.xy, np.asarray(expected_points), rtol=1e-7, atol=1e-9):
++            raise ValueError("walk coordinates do not match oriented edge geometry")
++        expected_length = float(sum(graph.edges[edge_id].length_px for edge_id in self.edge_ids))
++        if not np.isclose(self.length_px, expected_length, rtol=1e-6, atol=1e-9):
++            raise ValueError("walk length does not match its traversed graph edges")
++
++
+ @dataclass(frozen=True)
+ class PathScore:
+     """Measured ranking values for one feasible route.
+@@ -211,6 +449,8 @@ class PathScore:
+         Absolute error from ``expected_length_px``, in pixels.
+     turning_cost : float or None
+         Sampled mean squared turn angle, in squared radians.
++    endpoint_tangent_error_deg : float or None
++        Mean angular error for supplied endpoint tangent evidence, in degrees.
+
+     A ``None`` score dimension was not applicable or requested; it does not
+     represent zero. The model is immutable.
+@@ -221,6 +461,7 @@ class PathScore:
+     measured_confidence: float
+     length_error_px: float | None
+     turning_cost: float | None
++    endpoint_tangent_error_deg: float | None = None
+
+     def __post_init__(self) -> None:
+         for name in (
+@@ -228,6 +469,7 @@ class PathScore:
+             "endpoint_order_error_px",
+             "length_error_px",
+             "turning_cost",
++            "endpoint_tangent_error_deg",
+         ):
+             value = getattr(self, name)
+             if value is not None and (not np.isfinite(value) or value < 0.0):
+@@ -262,6 +504,12 @@ class PathRankingPolicy:
+     turning_cost_is_evidence : bool
+         Whether turning-cost separation may reduce ambiguity. Turning cost is
+         otherwise a deterministic ranking tie-breaker only.
++    ambiguity_endpoint_tangent_deg : float
++        Maximum tangent-error difference considered overlapping when enabled.
++    tangent_error_is_evidence : bool
++        Whether endpoint tangent error guides ranking and ambiguity decisions.
++    endpoint_tangents_are_hard : bool
++        Whether routes outside the supplied tangent tolerance are infeasible.
+
+     Guide tie tolerance controls ranking order and is separate from the
+     ambiguity tolerances. The model is immutable.
+@@ -276,6 +524,9 @@ class PathRankingPolicy:
+     ambiguity_length_error_px: float = 1.0
+     ambiguity_turning_cost: float = 0.1
+     turning_cost_is_evidence: bool = False
++    ambiguity_endpoint_tangent_deg: float = 15.0
++    tangent_error_is_evidence: bool = True
++    endpoint_tangents_are_hard: bool = False
+
+     def __post_init__(self) -> None:
+         for name in ("guide_samples", "turning_samples"):
+@@ -290,6 +541,7 @@ class PathRankingPolicy:
+             "ambiguity_confidence",
+             "ambiguity_length_error_px",
+             "ambiguity_turning_cost",
++            "ambiguity_endpoint_tangent_deg",
+         ):
+             value = getattr(self, name)
+             if not np.isfinite(value) or value < 0.0:
+@@ -297,6 +549,10 @@ class PathRankingPolicy:
+             object.__setattr__(self, name, float(value))
+         if not isinstance(self.turning_cost_is_evidence, bool):
+             raise TypeError("turning_cost_is_evidence must be bool")
++        if not isinstance(self.tangent_error_is_evidence, bool):
++            raise TypeError("tangent_error_is_evidence must be bool")
++        if not isinstance(self.endpoint_tangents_are_hard, bool):
++            raise TypeError("endpoint_tangents_are_hard must be bool")
+
+
+ DEFAULT_RANKING_POLICY = PathRankingPolicy()
+diff --git a/skeletonpaths/ranking.py b/skeletonpaths/ranking.py
+index 42c842f..d076a93 100644
+--- a/skeletonpaths/ranking.py
++++ b/skeletonpaths/ranking.py
+@@ -35,6 +35,67 @@ class _ScoredRoute:
+     score: PathScore
+
+
++def _normalized_tangents(
++    tangents: tuple[Point | None, Point | None] | None,
++) -> tuple[np.ndarray | None, np.ndarray | None] | None:
++    if tangents is None:
++        return None
++    if len(tangents) != 2:
++        raise ValueError("expected endpoint tangents must contain two xy vectors or None")
++    normalized = []
++    for tangent in tangents:
++        if tangent is None:
++            normalized.append(None)
++            continue
++        vector = np.asarray(tangent, dtype=float)
++        if vector.shape != (2,) or not np.isfinite(vector).all():
++            raise ValueError("expected endpoint tangents must be finite xy vectors")
++        magnitude = float(np.linalg.norm(vector))
++        if magnitude <= 1e-12:
++            raise ValueError("expected endpoint tangents must be nonzero vectors")
++        normalized.append(vector / magnitude)
++    return normalized[0], normalized[1]
++
++
++def _first_tangent(xy: np.ndarray) -> np.ndarray | None:
++    if len(xy) < 2:
++        return None
++    distances = np.linalg.norm(np.diff(xy, axis=0), axis=1)
++    total_length = float(distances.sum())
++    if total_length <= 1e-12:
++        return None
++    target_distance = min(2.0, total_length / 2.0)
++    sample_distances = np.concatenate(([0.0], np.cumsum(distances)))
++    sample_index = min(int(np.searchsorted(sample_distances, target_distance)), len(xy) - 1)
++    vector = xy[sample_index] - xy[0]
++    magnitude = float(np.linalg.norm(vector))
++    return vector / magnitude if magnitude > 1e-12 else None
++
++
++def _endpoint_tangent_errors(
++    xy: np.ndarray,
++    expected: tuple[np.ndarray | None, np.ndarray | None] | None,
++) -> tuple[float | None, float | None]:
++    if expected is None:
++        return None, None
++    actual = (_first_tangent(xy), None)
++    end_reverse_tangent = _first_tangent(xy[::-1])
++    actual = (actual[0], -end_reverse_tangent if end_reverse_tangent is not None else None)
++    errors = []
++    for expected_tangent, actual_tangent in zip(expected, actual, strict=True):
++        if expected_tangent is None or actual_tangent is None:
++            errors.append(None)
++            continue
++        cosine = float(np.clip(np.dot(expected_tangent, actual_tangent), -1.0, 1.0))
++        errors.append(float(np.degrees(np.arccos(cosine))))
++    return errors[0], errors[1]
++
++
++def _mean_tangent_error(errors: tuple[float | None, float | None]) -> float | None:
++    measured = [error for error in errors if error is not None]
++    return float(np.mean(measured)) if measured else None
++
++
+ def _score_landscapes_overlap(
+     first: PathScore, second: PathScore, policy: PathRankingPolicy
+ ) -> bool:
+@@ -57,6 +118,14 @@ def _score_landscapes_overlap(
+             and abs(first_value - second_value) > tolerance
+         ):
+             return False
++    if (
++        policy.tangent_error_is_evidence
++        and first.endpoint_tangent_error_deg is not None
++        and second.endpoint_tangent_error_deg is not None
++        and abs(first.endpoint_tangent_error_deg - second.endpoint_tangent_error_deg)
++        > policy.ambiguity_endpoint_tangent_deg
++    ):
++        return False
+     if abs(first.measured_confidence - second.measured_confidence) > policy.ambiguity_confidence:
+         return False
+     return not (
+@@ -73,7 +142,9 @@ def _rank_candidates(
+     path_kind: Literal["open", "loop", "open-with-loop"] = "open",
+     expected_cycles: int | None = None,
+     expected_endpoints: tuple[Point | None, Point | None] | None = None,
++    expected_endpoint_tangents: tuple[Point | None, Point | None] | None = None,
+     endpoint_tolerance_px: float = 3.0,
++    tangent_tolerance_deg: float = 35.0,
+     expected_length_px: float | None = None,
+     candidate_xy: ArrayLike | None = None,
+     path_inventory: TopologyPathInventory | None = None,
+@@ -102,6 +173,9 @@ def _rank_candidates(
+         raise ValueError("expected cycle count must be a nonnegative integer")
+     if not np.isfinite(endpoint_tolerance_px) or endpoint_tolerance_px < 0.0:
+         raise ValueError("endpoint tolerance must be finite and nonnegative")
++    if not np.isfinite(tangent_tolerance_deg) or not 0.0 <= tangent_tolerance_deg <= 180.0:
++        raise ValueError("tangent tolerance must be finite and between zero and 180 degrees")
++    expected_tangents = _normalized_tangents(expected_endpoint_tangents)
+     if expected_length_px is not None and (
+         not np.isfinite(expected_length_px) or expected_length_px <= 0.0
+     ):
+@@ -167,6 +241,15 @@ def _rank_candidates(
+         xy, routed_end = _edge_route(graph, edge_ids, start)
+         if routed_end != end:
+             continue
++        tangent_errors = _endpoint_tangent_errors(xy, expected_tangents)
++        tangent_error = _mean_tangent_error(tangent_errors)
++        if policy.endpoint_tangents_are_hard and any(
++            expected is not None and (error is None or error > tangent_tolerance_deg)
++            for expected, error in zip(
++                expected_tangents or (None, None), tangent_errors, strict=True
++            )
++        ):
++            continue
+         length = float(sum(graph.edges[edge_id].length_px for edge_id in edge_ids))
+         confidence = float(
+             np.average(
+@@ -192,16 +275,22 @@ def _rank_candidates(
+                 abs(length - expected_length_px) if expected_length_px is not None else None
+             ),
+             turning_cost=mean_squared_turn_angle(xy, samples=policy.turning_samples),
++            endpoint_tangent_error_deg=tangent_error,
+         )
+         scored.append(_ScoredRoute(route, length, score))
+
+     def tie_break_key(
+         item: _ScoredRoute,
+-    ) -> tuple[float, float, float, float, tuple[int, ...], int, int]:
++    ) -> tuple[float, float, float, float, float, tuple[int, ...], int, int]:
+         route = item.route
+         score = item.score
+         return (
+             score.endpoint_order_error_px if score.endpoint_order_error_px is not None else 0.0,
++            (
++                score.endpoint_tangent_error_deg
++                if policy.tangent_error_is_evidence and score.endpoint_tangent_error_deg is not None
++                else 0.0
++            ),
+             -score.measured_confidence,
+             score.length_error_px if score.length_error_px is not None else 0.0,
+             score.turning_cost if score.turning_cost is not None else 0.0,
+@@ -213,6 +302,12 @@ def _rank_candidates(
+     if candidate is None:
+         scored.sort(
+             key=lambda item: (
++                (
++                    item.score.endpoint_tangent_error_deg
++                    if policy.tangent_error_is_evidence
++                    and item.score.endpoint_tangent_error_deg is not None
++                    else 0.0
++                ),
+                 -item.score.measured_confidence,
+                 item.score.length_error_px if item.score.length_error_px is not None else 0.0,
+                 item.score.turning_cost if item.score.turning_cost is not None else 0.0,
+@@ -265,7 +360,9 @@ def rank_paths(
+     path_kind: Literal["open", "loop", "open-with-loop"] = "open",
+     expected_cycles: int | None = None,
+     expected_endpoints: tuple[Point | None, Point | None] | None = None,
++    expected_endpoint_tangents: tuple[Point | None, Point | None] | None = None,
+     endpoint_tolerance_px: float = 3.0,
++    tangent_tolerance_deg: float = 35.0,
+     expected_length_px: float | None = None,
+     candidate_xy: ArrayLike | None = None,
+     path_inventory: TopologyPathInventory | None = None,
+@@ -293,6 +390,11 @@ def rank_paths(
+     endpoint_tolerance_px : float
+         Maximum distance in pixels from each specified expected endpoint. Must be
+         finite and nonnegative.
++    expected_endpoint_tangents : tuple or None
++        Ordered start and end tangent vectors in xy coordinates. Either may be None.
++    tangent_tolerance_deg : float
++        Maximum angular error for hard tangent constraints, in degrees. It must be
++        between zero and 180 degrees and is used only when the policy enables hard constraints.
+     expected_length_px : float or None
+         Positive finite expected route length in pixels. When provided, length
+         error is ranking evidence; when omitted, shorter routes are not preferred.
+@@ -333,11 +435,14 @@ def rank_paths(
+     -----
+     Feasibility filtering precedes ranking. With ``candidate_xy``, symmetric
+     guide distance is primary; distances within ``guide_tie_tolerance_px`` are
+-    grouped by direct numeric tolerance, then endpoint-order error, measured
+-    confidence, expected-length error when present, turning cost, and deterministic
+-    route identity break ties. Without a guide, measured confidence is primary,
+-    followed by expected-length error when present, turning cost, and route
+-    identity. Turning cost is normally only a tie-breaker. ``limit`` controls
++    grouped by direct numeric tolerance, then endpoint-order error, tangent error
++    when enabled by policy, measured confidence, expected-length error when present,
++    turning cost, and deterministic route identity break ties. Without a guide,
++    tangent error is considered before measured confidence when enabled, followed
++    by expected-length error, turning cost, and route identity. Tangent evidence is
++    ranking evidence by default; ``endpoint_tangents_are_hard`` opts into filtering
++    routes outside ``tangent_tolerance_deg``. Tangents use samples separated by up
++    to two pixels. Turning cost is normally only a tie-breaker. ``limit`` controls
+     materialized results, not route enumeration or scoring.
+
+     See Also
+@@ -355,7 +460,9 @@ def rank_paths(
+         path_kind=path_kind,
+         expected_cycles=expected_cycles,
+         expected_endpoints=expected_endpoints,
++        expected_endpoint_tangents=expected_endpoint_tangents,
+         endpoint_tolerance_px=endpoint_tolerance_px,
++        tangent_tolerance_deg=tangent_tolerance_deg,
+         expected_length_px=expected_length_px,
+         candidate_xy=candidate_xy,
+         path_inventory=path_inventory,
+@@ -388,7 +495,9 @@ def select_path(
+     path_kind: Literal["open", "loop", "open-with-loop"] = "open",
+     expected_cycles: int | None = None,
+     expected_endpoints: tuple[Point | None, Point | None] | None = None,
++    expected_endpoint_tangents: tuple[Point | None, Point | None] | None = None,
+     endpoint_tolerance_px: float = 3.0,
++    tangent_tolerance_deg: float = 35.0,
+     expected_length_px: float | None = None,
+     candidate_xy: ArrayLike | None = None,
+     path_inventory: TopologyPathInventory | None = None,
+@@ -415,6 +524,11 @@ def select_path(
+     endpoint_tolerance_px : float
+         Maximum distance in pixels from each specified expected endpoint. Must be
+         finite and nonnegative.
++    expected_endpoint_tangents : tuple or None
++        Ordered start and end tangent vectors in xy coordinates. Either may be None.
++    tangent_tolerance_deg : float
++        Maximum angular error for hard tangent constraints, in degrees, between zero
++        and 180 degrees.
+     expected_length_px : float or None
+         Positive finite expected route length in pixels. When provided, length
+         error is ranking evidence; when omitted, shorter routes are not preferred.
+@@ -456,10 +570,10 @@ def select_path(
+     scored because they may affect ambiguity. ``ambiguous`` means another
+     different edge route has overlapping score evidence. ``orientation_ambiguous``
+     means the reversed orientation of the selected edge route remains
+-    indistinguishable within endpoint-order evidence. Neither flag changes
+-    measured confidence. Candidate geometry guides ranking and orientation; it
+-    does not establish physical direction. See ``rank_paths()`` for ranking order
+-    and parameter semantics.
++    indistinguishable within endpoint-order and enabled tangent evidence. Neither
++    flag changes measured confidence. Candidate geometry and tangent constraints
++    guide ranking and orientation but do not establish physical direction. See
++    ``rank_paths()`` for ranking order and parameter semantics.
+
+     See Also
+     --------
+@@ -471,7 +585,9 @@ def select_path(
+         path_kind=path_kind,
+         expected_cycles=expected_cycles,
+         expected_endpoints=expected_endpoints,
++        expected_endpoint_tangents=expected_endpoint_tangents,
+         endpoint_tolerance_px=endpoint_tolerance_px,
++        tangent_tolerance_deg=tangent_tolerance_deg,
+         expected_length_px=expected_length_px,
+         candidate_xy=candidate_xy,
+         path_inventory=path_inventory,
+@@ -502,14 +618,25 @@ def select_path(
+         xy, routed_end = _edge_route(graph, route.edge_ids, route.start_node)
+         if routed_end != selected.start_node or not np.allclose(xy, selected.xy[::-1]):
+             continue
+-        if (
++        endpoint_order_overlap = (
+             selected_record.score.endpoint_order_error_px is None
+             or record.score.endpoint_order_error_px is None
+             or abs(
+                 selected_record.score.endpoint_order_error_px - record.score.endpoint_order_error_px
+             )
+             <= policy.ambiguity_endpoint_order_px
+-        ):
++        )
++        tangent_overlap = (
++            not policy.tangent_error_is_evidence
++            or selected_record.score.endpoint_tangent_error_deg is None
++            or record.score.endpoint_tangent_error_deg is None
++            or abs(
++                selected_record.score.endpoint_tangent_error_deg
++                - record.score.endpoint_tangent_error_deg
++            )
++            <= policy.ambiguity_endpoint_tangent_deg
++        )
++        if endpoint_order_overlap and tangent_overlap:
+             orientation_ambiguous = True
+             break
+
+diff --git a/skeletonpaths/walk.py b/skeletonpaths/walk.py
+new file mode 100644
+index 0000000..789c439
+--- /dev/null
++++ b/skeletonpaths/walk.py
+@@ -0,0 +1,252 @@
++from __future__ import annotations
++
++import heapq
++from math import inf
++
++import numpy as np
++
++from .model import SkeletonGraph, SkeletonWalk
++
++
++class DisconnectedGraphError(ValueError):
++    """Raised when a graph cannot be covered by one continuous walk."""
++
++
++def _adjacency(graph: SkeletonGraph) -> tuple[dict[int, list[tuple[int, int]]], dict[int, int]]:
++    adjacent = {node.id: [] for node in graph.nodes}
++    degrees = {node.id: 0 for node in graph.nodes}
++    for edge_id, edge in enumerate(graph.edges):
++        adjacent[edge.a].append((edge.b, edge_id))
++        if edge.b != edge.a:
++            adjacent[edge.b].append((edge.a, edge_id))
++        degrees[edge.a] += 1
++        degrees[edge.b] += 1
++    for neighbors in adjacent.values():
++        neighbors.sort(key=lambda neighbor: (neighbor[1], neighbor[0]))
++    return adjacent, degrees
++
++
++def _shortest_paths(
++    graph: SkeletonGraph,
++    adjacent: dict[int, list[tuple[int, int]]],
++    source: int,
++) -> tuple[dict[int, float], dict[int, tuple[int, int]]]:
++    distances = {source: 0.0}
++    previous: dict[int, tuple[int, int]] = {}
++    queue = [(0.0, source)]
++    while queue:
++        distance, node = heapq.heappop(queue)
++        if distance != distances[node]:
++            continue
++        for neighbor, edge_id in adjacent[node]:
++            candidate = distance + graph.edges[edge_id].length_px
++            if candidate < distances.get(neighbor, inf):
++                distances[neighbor] = candidate
++                previous[neighbor] = (node, edge_id)
++                heapq.heappush(queue, (candidate, neighbor))
++    return distances, previous
++
++
++def _path_edges(
++    source: int,
++    target: int,
++    previous: dict[int, tuple[int, int]],
++) -> tuple[int, ...]:
++    path = []
++    current = target
++    while current != source:
++        current, edge_id = previous[current]
++        path.append(edge_id)
++    path.reverse()
++    return tuple(path)
++
++
++def _endpoints(
++    odd_nodes: list[int],
++    endpoint_nodes: list[int],
++    node_ids: set[int],
++    closed_start: int,
++    start_node: int | None,
++    end_node: int | None,
++) -> tuple[int, int]:
++    if start_node is None:
++        if end_node is None:
++            candidates = endpoint_nodes or odd_nodes
++            start_node = candidates[0] if candidates else closed_start
++        else:
++            candidates = [node for node in endpoint_nodes if node != end_node]
++            candidates = candidates or [node for node in odd_nodes if node != end_node]
++            candidates = candidates or [node for node in sorted(node_ids) if node != end_node]
++            start_node = candidates[0] if candidates else end_node
++    if end_node is None:
++        candidates = [node for node in endpoint_nodes if node != start_node]
++        candidates = candidates or [node for node in odd_nodes if node != start_node]
++        end_node = candidates[0] if candidates else start_node
++    return start_node, end_node
++
++
++def _validate_endpoint(node_id: int | None, node_ids: set[int], name: str) -> int | None:
++    if node_id is None:
++        return None
++    if isinstance(node_id, bool) or not isinstance(node_id, (int, np.integer)):
++        raise ValueError(f"{name} must be an integer node ID")
++    node_id = int(node_id)
++    if node_id not in node_ids:
++        raise ValueError(f"{name} is not present in the graph")
++    return node_id
++
++
++def covering_walk(
++    graph: SkeletonGraph,
++    *,
++    start_node: int | None = None,
++    end_node: int | None = None,
++) -> SkeletonWalk:
++    """Return a deterministic connected traversal covering every graph edge.
++
++    Repeated shortest paths correct vertex parity before a deterministic Euler
++    traversal. This bounded polynomial strategy is not necessarily globally
++    minimal and does not infer physical drawing direction.
++    """
++    if not isinstance(graph, SkeletonGraph):
++        raise TypeError("graph must be a SkeletonGraph")
++    node_ids = {node.id for node in graph.nodes}
++    start_node = _validate_endpoint(start_node, node_ids, "start_node")
++    end_node = _validate_endpoint(end_node, node_ids, "end_node")
++    if not graph.nodes:
++        if start_node is not None or end_node is not None:
++            raise ValueError("empty graph has no walk endpoints")
++        walk = SkeletonWalk(
++            xy=np.empty((0, 2)),
++            edge_ids=(),
++            edge_directions=(),
++            start_node=None,
++            end_node=None,
++            covered_edge_ids=(),
++            covered_edge_count=0,
++            total_edge_count=0,
++            repeated_edge_count=0,
++            length_px=0.0,
++        )
++        walk._validate_graph(graph)
++        return walk
++    if graph.component_count != 1:
++        raise DisconnectedGraphError("covering walk requires a connected graph")
++
++    adjacent, degrees = _adjacency(graph)
++    odd_nodes = sorted(node_id for node_id, degree in degrees.items() if degree % 2)
++    endpoint_nodes = sorted(node.id for node in graph.nodes if node.degree == 1)
++    closed_start = min(
++        graph.nodes,
++        key=lambda node: (node.xy[0], node.xy[1], node.id),
++    ).id
++    start_node, end_node = _endpoints(
++        odd_nodes,
++        endpoint_nodes,
++        node_ids,
++        closed_start,
++        start_node,
++        end_node,
++    )
++    target_odd_nodes = {start_node, end_node} if start_node != end_node else set()
++    to_pair = sorted(set(odd_nodes) ^ target_odd_nodes)
++
++    shortest_trees = {node: _shortest_paths(graph, adjacent, node) for node in to_pair}
++    duplicate_edge_ids = []
++    remaining = set(to_pair)
++    while remaining:
++        best = None
++        ordered = sorted(remaining)
++        for first_index, first in enumerate(ordered):
++            distances, _ = shortest_trees[first]
++            for second in ordered[first_index + 1 :]:
++                candidate = (distances.get(second, inf), first, second)
++                if best is None or candidate < best:
++                    best = candidate
++        if best is None or best[0] == inf:
++            raise RuntimeError("Euler parity correction could not pair the graph nodes")
++        _, first, second = best
++        _, previous = shortest_trees[first]
++        duplicate_edge_ids.extend(_path_edges(first, second, previous))
++        remaining.remove(first)
++        remaining.remove(second)
++
++    instance_edge_ids = list(range(len(graph.edges)))
++    instance_edge_ids.extend(duplicate_edge_ids)
++    walk_adjacency = {node_id: [] for node_id in node_ids}
++    for instance_id, edge_id in enumerate(instance_edge_ids):
++        edge = graph.edges[edge_id]
++        walk_adjacency[edge.a].append((instance_id, edge.b))
++        if edge.b != edge.a:
++            walk_adjacency[edge.b].append((instance_id, edge.a))
++    for neighbors in walk_adjacency.values():
++        neighbors.sort()
++
++    cursors = {node_id: 0 for node_id in node_ids}
++    used_instances = set()
++    stack = [(start_node, None)]
++    reverse_nodes = []
++    reverse_instances = []
++    while stack:
++        current = stack[-1][0]
++        neighbors = walk_adjacency[current]
++        cursor = cursors[current]
++        while cursor < len(neighbors) and neighbors[cursor][0] in used_instances:
++            cursor += 1
++        cursors[current] = cursor
++        if cursor == len(neighbors):
++            node, incoming_instance = stack.pop()
++            reverse_nodes.append(node)
++            if incoming_instance is not None:
++                reverse_instances.append(incoming_instance)
++            continue
++        instance_id, neighbor = neighbors[cursor]
++        cursors[current] += 1
++        if instance_id in used_instances:
++            continue
++        used_instances.add(instance_id)
++        stack.append((neighbor, instance_id))
++
++    if len(used_instances) != len(instance_edge_ids):
++        raise RuntimeError("covering walk did not traverse every augmented graph edge")
++    walk_nodes = list(reversed(reverse_nodes))
++    walk_instances = list(reversed(reverse_instances))
++    if walk_nodes[0] != start_node or walk_nodes[-1] != end_node:
++        raise RuntimeError("covering walk endpoints do not match the requested nodes")
++
++    node_by_id = {node.id: node for node in graph.nodes}
++    coordinates = [np.asarray(node_by_id[start_node].xy, dtype=float)]
++    traversed_edge_ids = []
++    edge_directions = []
++    for instance_id, source, target in zip(
++        walk_instances, walk_nodes[:-1], walk_nodes[1:], strict=True
++    ):
++        edge_id = instance_edge_ids[instance_id]
++        edge = graph.edges[edge_id]
++        if edge.a == source and edge.b == target:
++            points = edge.xy
++            direction = "forward"
++        elif edge.b == source and edge.a == target:
++            points = edge.xy[::-1]
++            direction = "reverse"
++        else:
++            raise RuntimeError("covering walk contains a nonincident graph edge")
++        coordinates.extend(points[1:])
++        traversed_edge_ids.append(edge_id)
++        edge_directions.append(direction)
++
++    covered_edge_ids = tuple(sorted(set(traversed_edge_ids)))
++    walk = SkeletonWalk(
++        xy=np.asarray(coordinates, dtype=float),
++        edge_ids=tuple(traversed_edge_ids),
++        edge_directions=tuple(edge_directions),
++        start_node=start_node,
++        end_node=end_node,
++        covered_edge_ids=covered_edge_ids,
++        covered_edge_count=len(covered_edge_ids),
++        total_edge_count=len(graph.edges),
++        repeated_edge_count=len(traversed_edge_ids) - len(covered_edge_ids),
++        length_px=float(sum(graph.edges[edge_id].length_px for edge_id in traversed_edge_ids)),
++    )
++    walk._validate_graph(graph)
++    return walk
+diff --git a/tests/test_analysis.py b/tests/test_analysis.py
+new file mode 100644
+index 0000000..b8a91b0
+--- /dev/null
++++ b/tests/test_analysis.py
+@@ -0,0 +1,151 @@
++import numpy as np
++import pytest
++from scipy.ndimage import distance_transform_edt
++
++from skeletonpaths import SkeletonAnalysis, SkeletonImage, analyze_mask, graph_from_mask
++
++
++def _mask(kind: str) -> np.ndarray:
++    mask = np.zeros((25, 27), dtype=bool)
++    if kind == "line":
++        mask[11:14, 3:24] = True
++    elif kind == "curve":
++        mask[3:22, 4:7] = True
++        mask[19:22, 4:23] = True
++    elif kind == "loop":
++        mask[3:6, 4:23] = True
++        mask[19:22, 4:23] = True
++        mask[3:22, 4:7] = True
++        mask[3:22, 20:23] = True
++    elif kind == "branch":
++        mask[3:14, 12:15] = True
++        mask[11:14, 4:23] = True
++    elif kind != "empty":
++        raise ValueError(kind)
++    return mask
++
++
++def _assert_graphs_equal(first, second) -> None:
++    assert first.nodes == second.nodes
++    assert len(first.edges) == len(second.edges)
++    for first_edge, second_edge in zip(first.edges, second.edges, strict=True):
++        assert (first_edge.a, first_edge.b) == (second_edge.a, second_edge.b)
++        np.testing.assert_array_equal(first_edge.xy, second_edge.xy)
++        assert first_edge.length_px == second_edge.length_px
++        assert first_edge.mean_radius_px == second_edge.mean_radius_px
++        assert first_edge.confidence == second_edge.confidence
++
++
++@pytest.mark.parametrize(
++    ("kind", "endpoints", "junctions", "cycles"),
++    [
++        ("line", 2, 0, 0),
++        ("curve", 2, 0, 0),
++        ("loop", 0, 0, 1),
++        ("branch", 3, 1, 0),
++        ("empty", 0, 0, 0),
++    ],
++)
++def test_analyze_mask_returns_complete_immutable_analysis(kind, endpoints, junctions, cycles):
++    input_mask = _mask(kind)
++    result = analyze_mask(input_mask)
++
++    assert isinstance(result, SkeletonAnalysis)
++    assert isinstance(result, SkeletonImage)
++    assert result.mask.shape == input_mask.shape
++    assert result.skeleton.shape == input_mask.shape
++    assert result.radius.shape == input_mask.shape
++    assert result.confidence.shape == input_mask.shape
++    assert result.endpoint_count == endpoints
++    assert result.junction_count == junctions
++    assert result.cycle_count == cycles
++    assert result.component_count == (0 if kind == "empty" else 1)
++    assert np.isfinite(result.radius).all()
++    assert np.all(result.radius >= 0.0)
++    assert np.all(result.confidence == 1.0)
++    assert not result.mask.flags.writeable
++    assert not result.skeleton.flags.writeable
++    assert not result.radius.flags.writeable
++    assert not result.confidence.flags.writeable
++    assert not np.shares_memory(result.mask, input_mask)
++    assert not np.any(result.skeleton & ~result.mask)
++    if kind == "empty":
++        assert result.graph.nodes == ()
++        assert result.graph.edges == ()
++        assert not result.skeleton.any()
++        assert not result.radius.any()
++    else:
++        assert result.skeleton.any()
++        assert result.radius.max() > 0.0
++
++
++def test_analyze_mask_radius_matches_mask_distance_transform_and_graph_samples():
++    mask = _mask("line")
++    result = analyze_mask(mask)
++
++    np.testing.assert_array_equal(result.radius, distance_transform_edt(mask))
++    for node in result.graph.nodes:
++        x, y = map(int, node.xy)
++        assert node.radius_px == result.radius[y, x]
++    for edge in result.graph.edges:
++        assert edge.mean_radius_px > 0.0
++
++
++def test_analyze_mask_propagates_confidence_and_prunes_spurs():
++    mask = np.zeros((31, 31), dtype=bool)
++    mask[4:27, 15] = True
++    mask[15, 9:16] = True
++    confidence = np.full(mask.shape, 0.75)
++
++    unpruned = analyze_mask(mask, confidence=confidence)
++    pruned = analyze_mask(mask, min_spur_length=7.0, confidence=confidence)
++
++    assert unpruned.endpoint_count == 3
++    assert pruned.endpoint_count == 2
++    assert all(node.confidence == 0.75 for node in pruned.graph.nodes)
++    assert all(edge.confidence == 0.75 for edge in pruned.graph.edges)
++    np.testing.assert_array_equal(pruned.confidence, confidence)
++    assert not np.shares_memory(pruned.confidence, confidence)
++    _assert_graphs_equal(
++        pruned.graph,
++        graph_from_mask(mask, min_spur_length=7.0, confidence=confidence),
++    )
++
++
++def test_analyze_mask_graph_order_is_deterministic():
++    mask = _mask("branch")
++
++    first = analyze_mask(mask)
++    second = analyze_mask(mask.copy())
++
++    _assert_graphs_equal(first.graph, second.graph)
++    np.testing.assert_array_equal(first.skeleton, second.skeleton)
++
++
++def test_analyze_mask_rejects_invalid_inputs():
++    with pytest.raises(ValueError, match="two-dimensional"):
++        analyze_mask(np.zeros((3, 4, 1), dtype=bool))
++
++    mask = _mask("line")
++    with pytest.raises(ValueError, match="confidence"):
++        analyze_mask(mask, confidence=np.ones((2, 2)))
++    with pytest.raises(ValueError, match="confidence"):
++        analyze_mask(mask, confidence=np.full(mask.shape, np.nan))
++    with pytest.raises(ValueError, match="confidence"):
++        analyze_mask(mask, confidence=np.full(mask.shape, -0.1))
++    with pytest.raises(ValueError, match="confidence"):
++        analyze_mask(mask, confidence=np.full(mask.shape, 1.1))
++    with pytest.raises(ValueError, match="spur length"):
++        analyze_mask(mask, min_spur_length=-1.0)
++
++
++def test_analyze_mask_rejects_invalid_radius_and_exposes_graph_diagnostics():
++    mask = _mask("line")
++    with pytest.raises(ValueError, match="radius map"):
++        analyze_mask(mask, radius=np.full(mask.shape, np.inf))
++
++    result = analyze_mask(mask)
++    assert result.component_count == result.graph.component_count
++    assert result.endpoint_count == result.graph.endpoint_count
++    assert result.junction_count == result.graph.junction_count
++    assert result.cycle_count == result.graph.cycle_count
+diff --git a/tests/test_covering_walk.py b/tests/test_covering_walk.py
+new file mode 100644
+index 0000000..7dc277e
+--- /dev/null
++++ b/tests/test_covering_walk.py
+@@ -0,0 +1,217 @@
++import numpy as np
++import pytest
++
++from skeletonpaths import (
++    DisconnectedGraphError,
++    SkeletonEdge,
++    SkeletonGraph,
++    SkeletonNode,
++    SkeletonWalk,
++    covering_walk,
++)
++
++
++def _graph(
++    points: dict[int, tuple[float, float]], pairs: tuple[tuple[int, int], ...]
++) -> SkeletonGraph:
++    degrees = {node_id: 0 for node_id in points}
++    for first, second in pairs:
++        degrees[first] += 1
++        degrees[second] += 1
++    nodes = tuple(
++        SkeletonNode(node_id, point, degrees[node_id], radius_px=1.0, confidence=1.0)
++        for node_id, point in points.items()
++    )
++    edges = []
++    for first, second in pairs:
++        xy = np.asarray((points[first], points[second]), dtype=float)
++        length = float(np.linalg.norm(xy[1] - xy[0]))
++        edges.append(SkeletonEdge(first, second, xy, length, 1.0, 1.0))
++    return SkeletonGraph(nodes, tuple(edges))
++
++
++def _line_graph() -> SkeletonGraph:
++    return _graph({0: (0.0, 0.0), 1: (1.0, 0.0), 2: (2.0, 0.0)}, ((0, 1), (1, 2)))
++
++
++def _star_graph() -> SkeletonGraph:
++    return _graph(
++        {0: (1.0, 1.0), 1: (0.0, 1.0), 2: (2.0, 1.0), 3: (1.0, 0.0)},
++        ((0, 1), (0, 2), (0, 3)),
++    )
++
++
++def _loop_graph() -> SkeletonGraph:
++    return _graph(
++        {0: (0.0, 0.0), 1: (1.0, 0.0), 2: (1.0, 1.0), 3: (0.0, 1.0)},
++        ((0, 1), (1, 2), (2, 3), (3, 0)),
++    )
++
++
++def _assert_coverage(graph: SkeletonGraph, walk: SkeletonWalk) -> None:
++    node_by_id = {node.id: node for node in graph.nodes}
++    assert walk.covered_edge_ids == tuple(range(len(graph.edges)))
++    assert walk.covered_edge_count == len(graph.edges)
++    assert walk.total_edge_count == len(graph.edges)
++    assert walk.repeated_edge_count == len(walk.edge_ids) - len(set(walk.edge_ids))
++    assert len(walk.edge_directions) == len(walk.edge_ids)
++    assert not walk.xy.flags.writeable
++    if walk.start_node is None:
++        assert graph.nodes == ()
++        assert walk.xy.shape == (0, 2)
++        return
++
++    current = walk.start_node
++    expected_xy = [np.asarray(node_by_id[current].xy)]
++    expected_length = 0.0
++    for edge_id, direction in zip(walk.edge_ids, walk.edge_directions, strict=True):
++        edge = graph.edges[edge_id]
++        if direction == "forward":
++            assert edge.a == current
++            points = edge.xy
++            current = edge.b
++        else:
++            assert edge.b == current
++            points = edge.xy[::-1]
++            current = edge.a
++        expected_xy.extend(points[1:])
++        expected_length += edge.length_px
++    assert current == walk.end_node
++    np.testing.assert_allclose(walk.xy, expected_xy)
++    assert walk.length_px == pytest.approx(expected_length)
++
++
++def test_covering_walk_covers_line_and_honors_reversed_endpoints():
++    graph = _line_graph()
++
++    walk = covering_walk(graph, start_node=2, end_node=0)
++
++    _assert_coverage(graph, walk)
++    assert walk.start_node == 2
++    assert walk.end_node == 0
++    np.testing.assert_array_equal(walk.xy[0], graph.nodes[2].xy)
++    np.testing.assert_array_equal(walk.xy[-1], graph.nodes[0].xy)
++    assert walk.edge_ids == (1, 0)
++
++
++def test_covering_walk_deterministically_covers_branched_and_odd_degree_graphs():
++    graph = _star_graph()
++
++    first = covering_walk(graph, start_node=1, end_node=2)
++    second = covering_walk(graph, start_node=1, end_node=2)
++
++    _assert_coverage(graph, first)
++    assert first.edge_ids == second.edge_ids
++    np.testing.assert_array_equal(first.xy, second.xy)
++    assert len(first.edge_ids) > len(graph.edges)
++    assert first.start_node == 1
++    assert first.end_node == 2
++    np.testing.assert_array_equal(first.xy[0], graph.nodes[1].xy)
++    np.testing.assert_array_equal(first.xy[-1], graph.nodes[2].xy)
++
++
++def test_covering_walk_closes_even_degree_loops():
++    graph = _loop_graph()
++
++    walk = covering_walk(graph)
++
++    _assert_coverage(graph, walk)
++    assert walk.start_node == walk.end_node == 0
++    assert len(walk.edge_ids) == len(graph.edges)
++    np.testing.assert_array_equal(walk.xy[0], walk.xy[-1])
++
++
++def test_covering_walk_handles_empty_and_isolated_graphs():
++    empty = covering_walk(SkeletonGraph((), ()))
++    isolated_graph = _graph({4: (2.0, 3.0)}, ())
++    isolated = covering_walk(isolated_graph)
++
++    assert empty.xy.shape == (0, 2)
++    assert empty.start_node is None and empty.end_node is None
++    assert isolated.xy.shape == (1, 2)
++    assert isolated.start_node == isolated.end_node == 4
++
++
++def test_covering_walk_rejects_disconnected_graphs_and_unknown_endpoints():
++    graph = _graph(
++        {0: (0.0, 0.0), 1: (1.0, 0.0), 2: (4.0, 0.0), 3: (5.0, 0.0)},
++        ((0, 1), (2, 3)),
++    )
++
++    with pytest.raises(DisconnectedGraphError, match="connected graph"):
++        covering_walk(graph)
++    with pytest.raises(ValueError, match="not present"):
++        covering_walk(_line_graph(), start_node=7)
++
++
++def test_covering_walk_single_edge_records_forward_and_reverse_direction():
++    graph = _graph({0: (0.0, 0.0), 1: (2.0, 0.0)}, ((0, 1),))
++
++    forward = covering_walk(graph, start_node=0, end_node=1)
++    reverse = covering_walk(graph, start_node=1, end_node=0)
++
++    _assert_coverage(graph, forward)
++    _assert_coverage(graph, reverse)
++    assert forward.edge_directions == ("forward",)
++    assert reverse.edge_directions == ("reverse",)
++
++
++def test_covering_walk_uses_graph_endpoints_and_covers_y_branch():
++    graph = _graph(
++        {0: (0.0, 0.0), 1: (-1.0, 1.0), 2: (1.0, 1.0), 3: (0.0, -1.0)},
++        ((0, 1), (0, 2), (0, 3)),
++    )
++
++    walk = covering_walk(graph)
++
++    _assert_coverage(graph, walk)
++    assert walk.start_node in {1, 2, 3}
++    assert walk.end_node in {1, 2, 3}
++    assert walk.repeated_edge_count > 0
++
++
++def test_covering_walk_loop_with_tail_and_same_start_end():
++    graph = _graph(
++        {
++            0: (0.0, 0.0),
++            1: (1.0, 0.0),
++            2: (1.0, 1.0),
++            3: (0.0, 1.0),
++            4: (-1.0, 0.0),
++        },
++        ((0, 1), (1, 2), (2, 3), (3, 0), (0, 4)),
++    )
++
++    open_walk = covering_walk(graph)
++    closed_walk = covering_walk(graph, start_node=4, end_node=4)
++
++    _assert_coverage(graph, open_walk)
++    _assert_coverage(graph, closed_walk)
++    assert open_walk.start_node == 4
++    assert open_walk.end_node == 0
++    assert closed_walk.start_node == closed_walk.end_node == 4
++    assert closed_walk.repeated_edge_count > 0
++
++
++def test_covering_walk_closed_graph_defaults_to_lexicographic_xy_node():
++    graph = _graph(
++        {0: (10.0, 0.0), 1: (0.0, 5.0), 2: (0.0, -2.0), 3: (3.0, 0.0)},
++        ((0, 1), (1, 2), (2, 3), (3, 0)),
++    )
++
++    walk = covering_walk(graph)
++
++    _assert_coverage(graph, walk)
++    assert walk.start_node == walk.end_node == 2
++
++
++def test_skeleton_walk_rejects_inconsistent_local_invariants():
++    from dataclasses import replace
++
++    walk = covering_walk(_line_graph())
++    with pytest.raises(ValueError, match="directions"):
++        replace(walk, edge_directions=("sideways", *walk.edge_directions[1:]))
++    with pytest.raises(ValueError, match="counts"):
++        replace(walk, repeated_edge_count=walk.repeated_edge_count + 1)
++    with pytest.raises(ValueError, match="length"):
++        replace(walk, length_px=walk.length_px + 1.0)
+diff --git a/tests/test_dependency_modes.py b/tests/test_dependency_modes.py
+index 7397c72..13c99ec 100644
+--- a/tests/test_dependency_modes.py
++++ b/tests/test_dependency_modes.py
+@@ -25,12 +25,13 @@ skeleton = np.zeros((5, 7), dtype=bool)
+ skeleton[2, 1:6] = True
+ graph = skeletonpaths.graph_from_skeleton(skeleton)
+ assert graph.endpoint_count == 2
+-try:
+-    skeletonpaths.graph_from_mask(skeleton)
+-except ImportError as error:
+-    assert "skeletonpaths[image]" in str(error)
+-else:
+-    raise AssertionError("graph_from_mask unexpectedly worked without image dependencies")
++for analyze in (skeletonpaths.analyze_mask, skeletonpaths.graph_from_mask):
++    try:
++        analyze(skeleton)
++    except ImportError as error:
++        assert "skeletonpaths[image]" in str(error)
++    else:
++        raise AssertionError(f"{analyze.__name__} unexpectedly worked without image dependencies")
+ """
+     result = subprocess.run(
+         [sys.executable, "-c", script],
+diff --git a/tests/test_mask_analysis.py b/tests/test_mask_analysis.py
+new file mode 100644
+index 0000000..6284ed5
+--- /dev/null
++++ b/tests/test_mask_analysis.py
+@@ -0,0 +1,92 @@
++import numpy as np
++import pytest
++
++from skeletonpaths import SkeletonImage, analyze_mask, graph_from_mask
++
++
++def _mask(kind: str) -> np.ndarray:
++    mask = np.zeros((17, 19), dtype=bool)
++    if kind == "line":
++        mask[7:10, 2:17] = True
++    elif kind == "branch":
++        mask[2:15, 8:11] = True
++        mask[7:10, 2:17] = True
++    elif kind == "loop":
++        mask[3:6, 3:16] = True
++        mask[11:14, 3:16] = True
++        mask[3:14, 3:6] = True
++        mask[3:14, 13:16] = True
++    elif kind != "empty":
++        raise ValueError(kind)
++    return mask
++
++
++def _assert_graph_equal(first, second) -> None:
++    assert first.nodes == second.nodes
++    assert len(first.edges) == len(second.edges)
++    for first_edge, second_edge in zip(first.edges, second.edges, strict=True):
++        assert first_edge.a == second_edge.a
++        assert first_edge.b == second_edge.b
++        np.testing.assert_array_equal(first_edge.xy, second_edge.xy)
++        assert first_edge.length_px == second_edge.length_px
++        assert first_edge.mean_radius_px == second_edge.mean_radius_px
++        assert first_edge.confidence == second_edge.confidence
++
++
++@pytest.mark.parametrize(
++    ("kind", "cycle_count"),
++    [("empty", 0), ("line", 0), ("branch", 0), ("loop", 1)],
++)
++def test_analyze_mask_returns_skeleton_radius_and_matching_graph(kind, cycle_count):
++    mask = _mask(kind)
++
++    result = analyze_mask(mask)
++
++    assert isinstance(result, SkeletonImage)
++    assert result.skeleton.shape == mask.shape
++    assert result.radius.shape == mask.shape
++    assert np.isfinite(result.radius).all()
++    assert np.all(result.radius >= 0.0)
++    assert not result.skeleton.flags.writeable
++    assert not result.radius.flags.writeable
++    assert result.graph.cycle_count == cycle_count
++    assert not np.any(result.skeleton & ~mask)
++    assert np.all(result.radius[~mask] == 0.0)
++    if mask.any():
++        assert result.skeleton.any()
++        assert result.radius.max() > 0.0
++    _assert_graph_equal(result.graph, graph_from_mask(mask))
++
++
++def test_analyze_mask_preserves_supplied_radius_confidence_and_filtering():
++    mask = _mask("line")
++    mask[0, 0] = True
++    radius = np.full(mask.shape, 2.5)
++    confidence = np.full(mask.shape, 0.75)
++
++    result = analyze_mask(
++        mask,
++        radius=radius,
++        confidence=confidence,
++        min_component_area=2,
++    )
++
++    assert not result.skeleton[0, 0]
++    np.testing.assert_array_equal(result.radius, radius)
++    assert all(node.confidence == 0.75 for node in result.graph.nodes)
++    _assert_graph_equal(
++        result.graph,
++        graph_from_mask(
++            mask,
++            radius=radius,
++            confidence=confidence,
++            min_component_area=2,
++        ),
++    )
++
++
++def test_skeleton_image_rejects_inconsistent_arrays():
++    from skeletonpaths import SkeletonGraph
++
++    with pytest.raises(ValueError, match="match the skeleton"):
++        SkeletonImage(np.zeros((3, 4), dtype=bool), np.zeros((4, 3)), SkeletonGraph((), ()))
+diff --git a/tests/test_ranking.py b/tests/test_ranking.py
+new file mode 100644
+index 0000000..20e6cac
+--- /dev/null
++++ b/tests/test_ranking.py
+@@ -0,0 +1,80 @@
++import numpy as np
++import pytest
++
++from skeletonpaths import (
++    PathRankingPolicy,
++    SkeletonEdge,
++    SkeletonGraph,
++    SkeletonNode,
++    rank_paths,
++    select_path,
++)
++
++
++def _line_graph() -> SkeletonGraph:
++    xy = np.array([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0], [3.0, 0.0]])
++    nodes = (
++        SkeletonNode(0, (0.0, 0.0), 1, 0.0, 1.0),
++        SkeletonNode(1, (3.0, 0.0), 1, 0.0, 1.0),
++    )
++    edge = SkeletonEdge(0, 1, xy, 3.0, 0.0, 1.0)
++    return SkeletonGraph(nodes, (edge,))
++
++
++def test_endpoint_tangents_rank_the_matching_route_orientation_first():
++    graph = _line_graph()
++
++    ranked = rank_paths(graph, expected_endpoint_tangents=((1.0, 0.0), (1.0, 0.0)))
++
++    assert ranked[0].start_node == 0
++    assert ranked[0].score.endpoint_tangent_error_deg == pytest.approx(0.0)
++    assert ranked[1].score.endpoint_tangent_error_deg == pytest.approx(180.0)
++    assert (
++        select_path(
++            graph,
++            expected_endpoint_tangents=((1.0, 0.0), (1.0, 0.0)),
++        ).orientation_ambiguous
++        is False
++    )
++
++
++def test_symmetric_tangent_evidence_preserves_orientation_ambiguity():
++    graph = _line_graph()
++
++    selection = select_path(
++        graph,
++        expected_endpoint_tangents=((0.0, 1.0), (0.0, 1.0)),
++    )
++
++    assert selection.orientation_ambiguous is True
++    assert selection.path.score.endpoint_tangent_error_deg == pytest.approx(90.0)
++
++
++def test_tangent_noise_within_hard_tolerance_keeps_route_and_does_not_mutate_graph():
++    graph = _line_graph()
++    edge_xy_before = graph.edges[0].xy.copy()
++    noisy_tangent = (np.cos(np.deg2rad(20.0)), np.sin(np.deg2rad(20.0)))
++    policy = PathRankingPolicy(endpoint_tangents_are_hard=True)
++
++    selection = select_path(
++        graph,
++        expected_endpoint_tangents=(noisy_tangent, noisy_tangent),
++        tangent_tolerance_deg=35.0,
++        policy=policy,
++    )
++
++    assert selection.path.start_node == 0
++    assert selection.path.score.endpoint_tangent_error_deg == pytest.approx(20.0)
++    assert selection.feasible_path_count == 1
++    np.testing.assert_array_equal(graph.edges[0].xy, edge_xy_before)
++
++
++def test_tangent_constraints_validate_vectors_and_tolerance():
++    graph = _line_graph()
++
++    with pytest.raises(ValueError, match="nonzero"):
++        rank_paths(graph, expected_endpoint_tangents=((0.0, 0.0), None))
++    with pytest.raises(ValueError, match="finite"):
++        rank_paths(graph, expected_endpoint_tangents=((np.nan, 0.0), None))
++    with pytest.raises(ValueError, match="between zero and 180"):
++        rank_paths(graph, expected_endpoint_tangents=(None, None), tangent_tolerance_deg=181.0)
+diff --git a/tests/test_skeletonpaths.py b/tests/test_skeletonpaths.py
+index cb3a3de..1eb996e 100644
+--- a/tests/test_skeletonpaths.py
++++ b/tests/test_skeletonpaths.py
+@@ -14,10 +14,14 @@ from skeletonpaths import (
+     PathSelection,
+     SkeletonEdge,
+     SkeletonGraph,
++    SkeletonImage,
+     SkeletonNode,
++    SkeletonWalk,
+     TopologyPathInventory,
+     TopologyRoute,
++    analyze_mask,
+     build_skeleton_graph,
++    covering_walk,
+     graph_from_mask,
+     graph_from_skeleton,
+     prepare_topology_paths,
+@@ -724,6 +728,7 @@ def test_junction_motifs_retain_per_pixel_topology(segments, expected):
+
+
+ def test_internal_module_exports_and_deprecated_names():
++    import skeletonpaths
+     import skeletonpaths.core as compatibility
+
+     graph = graph_from_skeleton(np.pad(np.ones((1, 5), dtype=bool), ((2, 2), (1, 1))))
+@@ -731,9 +736,18 @@ def test_internal_module_exports_and_deprecated_names():
+
+     assert graph_from_skeleton.__module__ == "skeletonpaths.graph"
+     assert graph_from_mask.__module__ == "skeletonpaths.image"
++    assert analyze_mask.__module__ == "skeletonpaths.image"
++    assert covering_walk.__module__ == "skeletonpaths.walk"
++    assert SkeletonImage.__module__ == "skeletonpaths.model"
++    assert SkeletonWalk.__module__ == "skeletonpaths.model"
+     assert prepare_topology_paths.__module__ == "skeletonpaths.routing"
+     assert rank_paths.__module__ == "skeletonpaths.ranking"
+     assert compatibility.rank_paths is rank_paths
++    assert compatibility.analyze_mask is analyze_mask
++    assert compatibility.covering_walk is covering_walk
++    assert skeletonpaths.SkeletonAnalysis.__module__ == "skeletonpaths.model"
++    assert compatibility.SkeletonAnalysis is skeletonpaths.SkeletonAnalysis
++    assert compatibility.DisconnectedGraphError is skeletonpaths.DisconnectedGraphError
+     with pytest.warns(DeprecationWarning, match="rank_topology_paths"):
+         legacy_ranked = rank_topology_paths(graph)
+     with pytest.warns(DeprecationWarning, match="select_topology_path"):

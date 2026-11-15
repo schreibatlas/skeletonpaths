@@ -1,0 +1,48 @@
+{
+  "candidate_count": 1,
+  "candidates": [
+    {
+      "additions": 1510,
+      "deletions": 80,
+      "patch_file": "026d957.patch",
+      "patch_sha256": "8dd6ec631164e0b1c090fc3c3e6bae4276ca2f38fe29b308097d34a7d8bd88af",
+      "paths": [
+        "README.md",
+        "docs/conf.py",
+        "docs/getting-started.md",
+        "docs/guide/ambiguity-and-ranking.md",
+        "docs/guide/graph-construction.md",
+        "docs/guide/path-selection.md",
+        "docs/index.md",
+        "docs/reference/api.md",
+        "docs/reference/behavior-contracts.md",
+        "examples/09_analyze_mask.py",
+        "examples/10_covering_walk.py",
+        "pyproject.toml",
+        "skeletonpaths/__init__.py",
+        "skeletonpaths/core.py",
+        "skeletonpaths/image.py",
+        "skeletonpaths/model.py",
+        "skeletonpaths/ranking.py",
+        "skeletonpaths/walk.py",
+        "tests/test_analysis.py",
+        "tests/test_covering_walk.py",
+        "tests/test_dependency_modes.py",
+        "tests/test_mask_analysis.py",
+        "tests/test_ranking.py",
+        "tests/test_skeletonpaths.py"
+      ],
+      "sha": "026d957dc0d27bc67703b380294d8bf77bf9ddb4",
+      "short_sha": "026d957",
+      "source_ref": "git:026d957dc0d27bc67703b380294d8bf77bf9ddb4"
+    }
+  ],
+  "git_base_ref": "0e1ce4fb0421c1f64d04203ebd8bf46ff1ffc451",
+  "git_base_sha": "0e1ce4fb0421c1f64d04203ebd8bf46ff1ffc451",
+  "git_head_ref": "026d957dc0d27bc67703b380294d8bf77bf9ddb4",
+  "git_head_sha": "026d957dc0d27bc67703b380294d8bf77bf9ddb4",
+  "include_merges": "nontrivial",
+  "object_type": "git_evidence_manifest",
+  "release_version": "v0.1.2",
+  "schema_version": 1
+}
