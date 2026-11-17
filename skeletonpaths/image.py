@@ -11,6 +11,7 @@ def analyze_mask(
     mask: ArrayLike,
     *,
     min_spur_length: float = 0.0,
+    min_spur_length_px: float | None = None,
     radius: ArrayLike | None = None,
     confidence: ArrayLike | None = None,
     min_component_area: int = 0,
@@ -25,6 +26,9 @@ def analyze_mask(
     min_spur_length : float
         Remove endpoint-to-junction branches strictly shorter than this
         threshold, in pixels. Zero preserves all spurs.
+    min_spur_length_px : float or None
+        Preferred pixel-suffixed alias for ``min_spur_length``. Supplying both
+        names with non-default values is invalid.
     radius : numpy.typing.ArrayLike or None
         Optional finite, nonnegative radius map matching ``mask``. If omitted,
         derive radius from the foreground with a Euclidean distance transform.
@@ -40,6 +44,7 @@ def analyze_mask(
     -------
     SkeletonAnalysis
         Owned read-only mask, skeleton, radius, and confidence arrays alongside the topology graph.
+        Optional component labels are included when available. The arrays are owned and read-only.
 
     Raises
     ------
@@ -63,6 +68,11 @@ def analyze_mask(
         or min_component_area < 0
     ):
         raise ValueError("minimum component area must be a nonnegative integer")
+    if min_spur_length_px is not None:
+        if min_spur_length != 0.0:
+            raise ValueError("pass either min_spur_length or min_spur_length_px, not both")
+        min_spur_length = min_spur_length_px
+    component_labels = None
     if min_component_area > 0:
         try:
             from scipy.ndimage import label as label_components
@@ -75,7 +85,16 @@ def analyze_mask(
         keep = areas >= min_component_area
         keep[0] = False
         source = keep[labels]
-
+        component_labels = np.where(source, labels, 0)
+    else:
+        try:
+            from scipy.ndimage import label as label_components
+        except ImportError:
+            pass
+        else:
+            component_labels, _ = label_components(
+                source, structure=np.ones((3, 3), dtype=np.uint8)
+            )
     radius_map: np.ndarray
     if radius is None:
         if source.any():
@@ -122,6 +141,7 @@ def analyze_mask(
         radius=radius_map,
         confidence=confidence_map,
         graph=graph,
+        component_labels=component_labels,
     )
 
 
@@ -129,6 +149,7 @@ def graph_from_mask(
     mask: ArrayLike,
     *,
     min_spur_length: float = 0.0,
+    min_spur_length_px: float | None = None,
     radius: ArrayLike | None = None,
     confidence: ArrayLike | None = None,
     min_component_area: int = 0,
@@ -140,6 +161,7 @@ def graph_from_mask(
     return analyze_mask(
         mask,
         min_spur_length=min_spur_length,
+        min_spur_length_px=min_spur_length_px,
         radius=radius,
         confidence=confidence,
         min_component_area=min_component_area,

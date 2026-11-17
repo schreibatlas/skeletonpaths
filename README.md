@@ -1,6 +1,6 @@
 # SkeletonPaths
 
-SkeletonPaths converts binary masks and precomputed skeletons into compact topology graphs and candidate routes. It provides route ranking and selection without claiming that a selected route is the true drawing order or physical stroke direction.
+SkeletonPaths converts binary masks and precomputed skeletons into topology graphs, routes, and bounded ranked stroke/traversal hypotheses. It reports ambiguity and evidence without claiming to recover true historical pen order or physical direction.
 
 Raster topology and route-selection policy belong to SkeletonPaths. Generic polyline geometry belongs to PlanarCurve. PlanarCurve is installed as a runtime dependency, so no separate install step is required.
 
@@ -46,19 +46,22 @@ print(selection.ambiguous)
 For a binary mask, use `graph_from_mask(mask)`. It skeletonizes the mask, derives a radius map from the source mask when one is not supplied, and retains all connected components by default.
 
 
-Use `analyze_mask(mask)` when reports need the mask, read-only skeleton, radius, confidence, and graph together. It returns a `SkeletonAnalysis`; radius is the Euclidean distance transform, and default confidence is all-ones foreground evidence, not a probability. Empty masks produce an empty graph and zero radius. For a connected graph, `covering_walk(graph, start_node=..., end_node=...)` returns a deterministic traversal hypothesis that may repeat edges. Its order is not physical drawing direction.
+Use `analyze_mask(mask)` to return immutable mask, skeleton, radius, confidence, optional component labels, and graph evidence in a `SkeletonAnalysis`. The default radius is derived from the foreground; default confidence is all-ones evidence, not a probability. `covering_walk()` returns one deterministic traversal for a connected graph, while `rank_covering_walks()` returns bounded ranked multi-walk hypotheses. Neither API claims physical pen order.
+
+
+For spur filtering, `analyze_mask()` and `graph_from_mask()` accept the legacy `min_spur_length` name and the preferred `min_spur_length_px` alias; do not supply both with non-default values.
 
 ## Documentation
 
-The Sphinx guides and API reference are maintained in the [documentation sources on GitHub](https://github.com/schreibatlas/skeletonpaths/tree/main/docs). They explain graph construction, route selection, ranking and ambiguity, search limits, and the supported API.
+The Sphinx guides and API reference explain graph construction, route selection, multi-stroke hypotheses, ranking and ambiguity, search limits, and the supported API.
 
 ## Processing pipeline
 
 1. Supply a two-dimensional binary mask or already-thinned skeleton. Boolean arrays and finite numeric arrays containing only `0` and `1` are accepted. NaN, infinity, and other numeric values are rejected.
 2. `graph_from_mask()` optionally removes small components, derives radius values from the source mask with a Euclidean distance transform when no radius map is supplied, and skeletonizes the remaining mask. `graph_from_skeleton()` skips skeletonization and defaults radius values to zero when no radius map is supplied.
-3. Raster pixels are converted to an undirected topology graph. Pixels whose degree differs from two remain graph nodes. An all-degree-two component receives a deterministic representative node. Degree-two chains become graph edges. Short spurs are preserved unless `min_spur_length` is explicitly set above zero.
-4. Route enumeration produces `TopologyRoute` records. `rank_paths()` scores feasible routes, and `select_path()` returns the selected route with selection-context ambiguity metadata.
-5. The selected route's `xy` array can be passed to PlanarCurve for generic curve resampling or geometry operations.
+3. Raster pixels are converted to an undirected topology graph. Pixels whose degree differs from two remain graph nodes. An all-degree-two component receives a deterministic representative node. Degree-two chains become graph edges. Short spurs are preserved unless `min_spur_length` or `min_spur_length_px` is set above zero.
+4. Use `rank_paths()` and `select_path()` for simple route selection. Use `rank_covering_walks()` for bounded multi-walk hypotheses, including explicit repeats, junction pairing alternatives, and ambiguity evidence.
+5. Pass candidate `xy` geometry and optional guide paths to PlanarCurve-backed scoring. Geometry and orientation help rank hypotheses but do not establish historical pen behavior.
 
 ## Coordinates and raster topology
 
@@ -76,15 +79,19 @@ Graph edges represent undirected raster evidence. Their stored endpoint and edge
 The public models are frozen. Graph and path collections are tuples, graph and path coordinate arrays are read-only, and inventory mappings are immutable.
 
 - `SkeletonGraph` contains nodes and edges, with `component_count`, `cycle_count`, `endpoint_count`, and `junction_count` graph diagnostics.
-- `SkeletonAnalysis` contains owned read-only mask, skeleton, radius, and confidence arrays alongside the graph. Its graph diagnostics delegate to `SkeletonGraph`.
+- `SkeletonAnalysis` contains owned read-only mask, skeleton, radius, and confidence arrays, optional component labels, and the graph. Its graph diagnostics delegate to `SkeletonGraph`.
 - `SkeletonNode` records its integer ID, `(x, y)` coordinate, degree, radius in pixels, and confidence.
 - `SkeletonEdge` records endpoint node IDs, ordered `(x, y)` geometry, length in pixels, mean radius, and confidence.
 - `TopologyRoute` records an ordered edge sequence, start and end node IDs, and route-level cycle count. Routes are undirected graph traversals with an explicit orientation for geometry assembly.
 - `SkeletonPath` contains assembled route geometry, edge IDs, oriented endpoint IDs, length, measured confidence, route cycle count, and `PathScore`. It does not contain selection ambiguity flags.
-- `SkeletonWalk` records each traversed edge ID and direction, including repeats, plus unique covered edge IDs, coverage and repetition counts, endpoints, geometry, and traversal length.
+- `SkeletonWalk` records ordered `RouteStep` values, endpoints, geometry, covered edges, and repeats. Its `reversed()` operation explicitly reverses both traversal order and direction; partial walks support multi-stroke hypotheses.
 - `PathScore` reports guide distance, ordered-endpoint error, endpoint-tangent error in degrees, measured confidence, expected-length error, and sampled turning cost in squared radians. Measurements that do not apply are `None`.
 - `PathSelection` contains the selected `path`, whether a competing route is ambiguous, whether the same route has an ambiguous orientation, and `feasible_path_count`.
 - `TopologyPathInventory` stores enumerated routes by the requested path kinds for reuse during ranking.
+- `RouteStep` identifies one edge and its explicit `a-to-b` or `b-to-a` traversal direction.
+- `JunctionPairing` records generic tangent-ranked branch pairs and unpaired edges, not physical truth.
+- `StrokeHypothesis` contains walks, covered and uncovered edges, repeated-edge evidence, lift count, separate score dimensions, pairing candidates, and route, orientation, and component-order ambiguity.
+- `StrokeSearchLimits` and `StrokeSearchPolicy` configure hard bounds and separate ranking penalties.
 
 
 `path_kind` selects the route topology:
@@ -143,14 +150,37 @@ By default, `prepare_topology_paths()` prepares `"open"`, `"loop"`, and `"open-w
 
 When either search limit is exceeded, `PathSearchLimitError` is raised rather than returning a partial result. The exception exposes `path_kind`, `limit_name`, `limit_value`, and `observed`. The older `max_paths` keyword remains available on route preparation, ranking, and selection; do not pass it together with `limits`.
 
+## Multi-stroke hypotheses
+
+`rank_covering_walks(graph, ...)` returns a deterministic ranked tuple of stroke-set hypotheses. `stroke_hypotheses_from_analysis(analysis, ...)` uses the graph from a mask analysis. The existing singular `covering_walk()` remains available for clients that need one connected graph-covering traversal.
+
+Each `StrokeHypothesisScore` preserves coverage error, uncovered length, repeat length, turning cost, junction pairing cost, lift cost, guide distance, and cycle error separately. `StrokeSearchPolicy` configures their ranking penalties. `JunctionPairing` candidates use local tangents and optional guides to rank alternatives without asserting which pairing is physically true. Disconnected components produce separate walks and set `component_order_ambiguous` because their temporal ordering is unavailable from the raster.
+
+A repeat is evidence about a hypothesis only. `repeat_required_by_hypothesis` never means that the source was observed to be retraced. Orientation flags and component ordering likewise describe ambiguity in candidate explanations, not recovered history. If the requested result `limit` omits lower-ranked candidates, each returned hypothesis sets `truncated=True`.
+
+`StrokeSearchLimits` bounds each search stage. Defaults are:
+
+| Limit | Default | Bound |
+| --- | ---: | --- |
+| `max_states` | 100,000 | Expanded pairing and scoring states |
+| `max_hypotheses` | 1,000 | Completed hypotheses retained for ranking |
+| `max_walk_steps` | 10,000 | Traversal steps scored in a hypothesis |
+| `max_repeated_edges` | 8 | Repeated edge traversals in a hypothesis |
+| `max_strokes` | 64 | Walks accepted in one hypothesis |
+| `max_junction_pairings` | 1,000 | Pairing candidates and combinations |
+
+`StrokeSearchLimitError` and `JunctionPairingLimitError` report the limit name, configured value, observed value, and search stage. PlanarCurve provides guide distance, arc-length, tangent, turn, and directed trajectory descriptor calculations.
+
+Run the complete example with `python examples/11_stroke_hypotheses.py` after installing `skeletonpaths[image]`.
+
 ## Core API
 
 The supported package-root exports are:
 
-- Constants: `DEFAULT_MAX_PATHS`, `DEFAULT_RANKING_POLICY`, `DEFAULT_SEARCH_LIMITS`, `__version__`.
-- Models and errors: `DisconnectedGraphError`, `NoFeasiblePathError`, `PathRankingPolicy`, `PathScore`, `PathSearchLimitError`, `PathSearchLimits`, `PathSelection`, `SkeletonAnalysis`, `SkeletonEdge`, `SkeletonGraph`, `SkeletonImage`, `SkeletonNode`, `SkeletonPath`, `SkeletonWalk`, `TopologyPathInventory`, and `TopologyRoute`.
-- Graph and image functions: `analyze_mask`, `build_skeleton_graph`, `covering_walk`, `graph_from_mask`, `graph_from_skeleton`, and `prune_spurs`.
-- Routing and ranking functions: `prepare_topology_paths`, `rank_paths`, and `select_path`.
+- Constants: `DEFAULT_MAX_PATHS`, `DEFAULT_RANKING_POLICY`, `DEFAULT_SEARCH_LIMITS`, `DEFAULT_STROKE_SEARCH_LIMITS`, `DEFAULT_STROKE_SEARCH_POLICY`, and `__version__`.
+- Models and errors: `DisconnectedGraphError`, `JunctionPairing`, `JunctionPairingLimitError`, `NoFeasiblePathError`, path scoring and limit types, `RouteStep`, `SkeletonAnalysis`, graph/image/path/walk models, `StrokeHypothesis`, `StrokeHypothesisScore`, `StrokeSearchLimitError`, `StrokeSearchLimits`, `StrokeSearchPolicy`, `TopologyPathInventory`, and `TopologyRoute`.
+- Graph, image, and hypothesis functions: `analyze_mask`, `build_skeleton_graph`, `covering_walk`, `graph_from_mask`, `graph_from_skeleton`, `prune_spurs`, `rank_covering_walks`, and `stroke_hypotheses_from_analysis`.
+- Route functions: `prepare_topology_paths`, `rank_paths`, and `select_path`.
 
 `graph_from_skeleton()` is the lightweight entry point for pre-thinned images. `graph_from_mask()` uses the optional image dependencies. `build_skeleton_graph()` is the lower-level graph constructor and skeletonizes by default unless `already_skeleton=True`.
 
@@ -165,7 +195,7 @@ SkeletonPaths owns raster connectivity, graph construction, route enumeration, a
 - Graph topology and routes are undirected. An oriented route is an ordering for geometry, not evidence of physical direction.
 - A selected route is not guaranteed to be the intended route. Inspect `PathSelection` ambiguity and the scores when alternatives matter.
 - Measured confidence is propagated from input values. It is not a probability that a route is correct.
-- SkeletonPaths does not infer pen lifts, stroke order, crossings, or application-specific meanings from raster topology.
+- Static raster evidence cannot establish true pen lifts, historical stroke order, physical branch pairings, or drawing direction. The library returns generic alternatives and marks ambiguity instead.
 
 ## Provenance and stability
 

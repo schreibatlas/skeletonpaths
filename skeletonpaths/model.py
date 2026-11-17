@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -234,12 +236,13 @@ class SkeletonAnalysis(SkeletonImage):
     """Immutable result of analyzing a binary mask.
 
     ``mask``, ``skeleton``, ``radius``, and ``confidence`` are owned read-only
-    arrays. Confidence is generic foreground evidence, not a probability that
-    any graph route or traversal is correct.
+    arrays. ``component_labels`` is read-only when present. Confidence is generic
+    foreground evidence, not a probability that any route or traversal is correct.
     """
 
     mask: np.ndarray
     confidence: np.ndarray
+    component_labels: np.ndarray | None
 
     def __init__(
         self,
@@ -248,12 +251,14 @@ class SkeletonAnalysis(SkeletonImage):
         radius: np.ndarray,
         confidence: np.ndarray,
         graph: SkeletonGraph,
+        component_labels: np.ndarray | None = None,
     ) -> None:
         object.__setattr__(self, "mask", mask)
         object.__setattr__(self, "skeleton", skeleton)
         object.__setattr__(self, "radius", radius)
         object.__setattr__(self, "confidence", confidence)
         object.__setattr__(self, "graph", graph)
+        object.__setattr__(self, "component_labels", component_labels)
         self.__post_init__()
 
     def __post_init__(self) -> None:
@@ -261,6 +266,7 @@ class SkeletonAnalysis(SkeletonImage):
         mask = np.asarray(self.mask)
         if mask.ndim != 2 or mask.shape != self.skeleton.shape:
             raise ValueError("mask must be two-dimensional and match the skeleton")
+
         if not np.issubdtype(mask.dtype, np.bool_) and (
             not np.issubdtype(mask.dtype, np.number)
             or not np.isfinite(mask).all()
@@ -274,12 +280,26 @@ class SkeletonAnalysis(SkeletonImage):
             or np.any((confidence < 0.0) | (confidence > 1.0))
         ):
             raise ValueError("confidence must be finite, between zero and one, and match the mask")
+        component_labels = self.component_labels
+        if component_labels is not None:
+            labels = np.asarray(component_labels)
+            if (
+                labels.shape != mask.shape
+                or not np.issubdtype(labels.dtype, np.integer)
+                or np.any(labels < 0)
+                or np.any(labels[~mask] != 0)
+            ):
+                raise ValueError("component labels must be nonnegative integers matching the mask")
+            component_labels = np.array(labels, copy=True)
+            component_labels.setflags(write=False)
         mask = np.array(mask, dtype=bool, copy=True)
         confidence = np.array(confidence, dtype=float, copy=True)
         mask.setflags(write=False)
         confidence.setflags(write=False)
         object.__setattr__(self, "mask", mask)
         object.__setattr__(self, "confidence", confidence)
+        if component_labels is not None:
+            object.__setattr__(self, "component_labels", component_labels)
 
     @property
     def component_count(self) -> int:
@@ -296,6 +316,30 @@ class SkeletonAnalysis(SkeletonImage):
     @property
     def cycle_count(self) -> int:
         return self.graph.cycle_count
+
+
+@dataclass(frozen=True)
+class RouteStep:
+    """One explicitly oriented graph-edge traversal."""
+
+    edge_id: int
+    direction: Literal["a-to-b", "b-to-a"]
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.edge_id, bool)
+            or not isinstance(self.edge_id, (int, np.integer))
+            or self.edge_id < 0
+        ):
+            raise ValueError("route step edge ID must be a nonnegative integer")
+        if self.direction not in {"a-to-b", "b-to-a"}:
+            raise ValueError("route step direction must be 'a-to-b' or 'b-to-a'")
+        object.__setattr__(self, "edge_id", int(self.edge_id))
+
+    def reversed(self) -> RouteStep:
+        """Return this edge step in the opposite graph direction."""
+        direction = "b-to-a" if self.direction == "a-to-b" else "a-to-b"
+        return RouteStep(self.edge_id, direction)
 
 
 @dataclass(frozen=True)
@@ -352,8 +396,7 @@ class SkeletonWalk:
         covered_count, total_count, repeated_count = (int(count) for count in counts)
         if (
             covered_count != len(covered_edge_ids)
-            or covered_count != total_count
-            or covered_edge_ids != tuple(range(total_count))
+            or any(edge_id >= total_count for edge_id in covered_edge_ids)
             or repeated_count != len(edge_ids) - covered_count
         ):
             raise ValueError("walk edge coverage counts are inconsistent")
@@ -375,7 +418,7 @@ class SkeletonWalk:
         elif self.start_node is None:
             if len(points) != 0 or total_count != 0:
                 raise ValueError("an empty graph walk must have no coordinates or edges")
-        elif len(points) != 1 or self.start_node != self.end_node or total_count != 0:
+        elif len(points) != 1 or self.start_node != self.end_node:
             raise ValueError("a walk without edges must represent one isolated node")
         points = np.array(points, copy=True)
         points.setflags(write=False)
@@ -391,6 +434,32 @@ class SkeletonWalk:
             object.__setattr__(self, "start_node", int(self.start_node))
             assert self.end_node is not None
             object.__setattr__(self, "end_node", int(self.end_node))
+
+    @property
+    def steps(self) -> tuple[RouteStep, ...]:
+        """Traversal steps using directions relative to each graph edge."""
+        return tuple(
+            RouteStep(edge_id, "a-to-b" if direction == "forward" else "b-to-a")
+            for edge_id, direction in zip(self.edge_ids, self.edge_directions, strict=True)
+        )
+
+    def reversed(self) -> SkeletonWalk:
+        """Return the same traversal with order and direction reversed."""
+        return SkeletonWalk(
+            xy=self.xy[::-1],
+            edge_ids=self.edge_ids[::-1],
+            edge_directions=tuple(
+                "reverse" if direction == "forward" else "forward"
+                for direction in reversed(self.edge_directions)
+            ),
+            start_node=self.end_node,
+            end_node=self.start_node,
+            covered_edge_ids=self.covered_edge_ids,
+            covered_edge_count=self.covered_edge_count,
+            total_edge_count=self.total_edge_count,
+            repeated_edge_count=self.repeated_edge_count,
+            length_px=self.length_px,
+        )
 
     def _validate_graph(self, graph: SkeletonGraph) -> None:
         if self.total_edge_count != len(graph.edges):
@@ -430,6 +499,267 @@ class SkeletonWalk:
         expected_length = float(sum(graph.edges[edge_id].length_px for edge_id in self.edge_ids))
         if not np.isclose(self.length_px, expected_length, rtol=1e-6, atol=1e-9):
             raise ValueError("walk length does not match its traversed graph edges")
+
+
+@dataclass(frozen=True)
+class StrokeSearchLimits:
+    """Hard bounds for states, candidate hypotheses, traversal work, repeats,
+    walks, and junction pairings."""
+
+    max_states: int = 100_000
+    max_hypotheses: int = 1_000
+    max_walk_steps: int = 10_000
+    max_repeated_edges: int = 8
+    max_strokes: int = 64
+    max_junction_pairings: int = 1_000
+
+    def __post_init__(self) -> None:
+        for name in (
+            "max_states",
+            "max_hypotheses",
+            "max_walk_steps",
+            "max_strokes",
+            "max_junction_pairings",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
+            object.__setattr__(self, name, int(value))
+        value = self.max_repeated_edges
+        if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or value < 0:
+            raise ValueError("max_repeated_edges must be a nonnegative integer")
+        object.__setattr__(self, "max_repeated_edges", int(value))
+
+
+@dataclass(frozen=True)
+class StrokeSearchPolicy:
+    """Configure independent ranking penalties and ambiguity tolerances.
+
+    Coverage, uncovered length, repeat length, lift count, cycle error, turning
+    cost, junction pairing cost, and guide distance each have a weight. The two
+    ambiguity tolerances control score overlap and endpoint-order overlap.
+    """
+
+    coverage_error_weight: float = 1_000_000.0
+    uncovered_length_weight: float = 1_000.0
+    repeat_length_weight: float = 100.0
+    lift_cost_weight: float = 10.0
+    cycle_error_weight: float = 25.0
+    turning_cost_weight: float = 1.0
+    junction_pairing_cost_weight: float = 1.0
+    guide_distance_weight: float = 1.0
+    ambiguity_score_tolerance: float = 0.05
+    orientation_ambiguity_tolerance_px: float = 0.5
+    junction_pairing_tie_tolerance: float = 0.05
+
+    def __post_init__(self) -> None:
+        for name in (
+            "coverage_error_weight",
+            "uncovered_length_weight",
+            "repeat_length_weight",
+            "lift_cost_weight",
+            "cycle_error_weight",
+            "turning_cost_weight",
+            "junction_pairing_cost_weight",
+            "guide_distance_weight",
+            "ambiguity_score_tolerance",
+            "orientation_ambiguity_tolerance_px",
+            "junction_pairing_tie_tolerance",
+        ):
+            value = getattr(self, name)
+            if not np.isfinite(value) or value < 0.0:
+                raise ValueError(f"{name} must be finite and nonnegative")
+            object.__setattr__(self, name, float(value))
+
+
+@dataclass(frozen=True)
+class JunctionPairing:
+    """One generic candidate pairing of branches at a graph junction.
+
+    ``pairs`` contains edge-ID pairs; ``unpaired_edges`` retains branches not
+    paired by this candidate. ``tangent_cost`` is generic geometry evidence, not
+    a claim about the physically correct stroke continuation.
+    """
+
+    node_id: int
+    pairs: tuple[tuple[int, int], ...]
+    unpaired_edges: tuple[int, ...]
+    tangent_cost: float
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.node_id, bool)
+            or not isinstance(self.node_id, (int, np.integer))
+            or self.node_id < 0
+        ):
+            raise ValueError("junction node ID must be a nonnegative integer")
+        pairs = tuple(tuple(pair) for pair in self.pairs)
+        if any(len(pair) != 2 for pair in pairs):
+            raise ValueError("junction pairs must contain two edge IDs")
+        normalized_pairs = tuple(tuple(sorted(pair)) for pair in pairs)
+        unpaired = tuple(self.unpaired_edges)
+        edge_ids = [edge_id for pair in normalized_pairs for edge_id in pair] + list(unpaired)
+        if any(
+            isinstance(edge_id, bool) or not isinstance(edge_id, (int, np.integer)) or edge_id < 0
+            for edge_id in edge_ids
+        ):
+            raise ValueError("junction edge IDs must be nonnegative integers")
+        if len(set(edge_ids)) != len(edge_ids):
+            raise ValueError("junction pairing edge IDs must be unique")
+        if not np.isfinite(self.tangent_cost) or self.tangent_cost < 0.0:
+            raise ValueError("junction tangent cost must be finite and nonnegative")
+        object.__setattr__(self, "node_id", int(self.node_id))
+        object.__setattr__(self, "pairs", tuple(sorted(normalized_pairs)))
+        object.__setattr__(self, "unpaired_edges", tuple(sorted(int(edge) for edge in unpaired)))
+        object.__setattr__(self, "tangent_cost", float(self.tangent_cost))
+
+
+@dataclass(frozen=True)
+class StrokeHypothesisScore:
+    """Independent measurements used to rank one stroke-set explanation.
+
+    Lengths and guide distance are in pixels. ``turning_cost`` is measured in
+    squared radians; lift and cycle costs are counts/errors. ``coverage_error``
+    is a normalized uncovered-length measure. These dimensions stay separate.
+    """
+
+    coverage_error: float
+    uncovered_length_px: float
+    repeat_length_px: float
+    turning_cost: float
+    junction_pairing_cost: float
+    lift_cost: float
+    guide_distance_px: float | None
+    cycle_error: float = 0.0
+
+    def __post_init__(self) -> None:
+        for name in (
+            "coverage_error",
+            "uncovered_length_px",
+            "repeat_length_px",
+            "turning_cost",
+            "junction_pairing_cost",
+            "lift_cost",
+            "cycle_error",
+        ):
+            value = getattr(self, name)
+            if not np.isfinite(value) or value < 0.0:
+                raise ValueError(f"{name} must be finite and nonnegative")
+            object.__setattr__(self, name, float(value))
+        if self.guide_distance_px is not None:
+            if not np.isfinite(self.guide_distance_px) or self.guide_distance_px < 0.0:
+                raise ValueError("guide distance must be finite and nonnegative")
+            object.__setattr__(self, "guide_distance_px", float(self.guide_distance_px))
+
+
+@dataclass(frozen=True)
+class StrokeHypothesis:
+    """A scored explanation of graph edges as one or more traversal walks.
+
+    ``walks`` are topology alternatives, not observed physical strokes. The
+    coverage and repeat fields summarize their edge evidence. Ambiguity flags
+    describe competing routes, orientations, and component orders; ``truncated``
+    means lower-ranked candidates were omitted by the requested result limit.
+    """
+
+    walks: tuple[SkeletonWalk, ...]
+    covered_edge_ids: frozenset[int]
+    uncovered_edge_ids: frozenset[int]
+    repeated_edge_ids: tuple[int, ...]
+    pen_lift_count: int
+    score: StrokeHypothesisScore
+    route_ambiguous: bool
+    orientation_ambiguous: bool
+    junction_pairings: tuple[JunctionPairing, ...] = ()
+    component_order_ambiguous: bool = False
+    orientation_ambiguous_strokes: tuple[bool, ...] = ()
+    repeat_required_by_hypothesis: bool = False
+    truncated: bool = False
+
+    def __post_init__(self) -> None:
+        walks = tuple(self.walks)
+        if any(not isinstance(walk, SkeletonWalk) for walk in walks):
+            raise TypeError("hypothesis walks must be SkeletonWalk values")
+        covered = frozenset(self.covered_edge_ids)
+        uncovered = frozenset(self.uncovered_edge_ids)
+        repeated = tuple(sorted(set(self.repeated_edge_ids)))
+        edge_ids = covered | uncovered | set(repeated)
+        if any(
+            isinstance(edge_id, bool) or not isinstance(edge_id, (int, np.integer)) or edge_id < 0
+            for edge_id in edge_ids
+        ):
+            raise ValueError("hypothesis edge IDs must be nonnegative integers")
+        if covered & uncovered or not set(repeated) <= covered:
+            raise ValueError("hypothesis edge coverage and repetition sets are inconsistent")
+        if (
+            isinstance(self.pen_lift_count, bool)
+            or not isinstance(self.pen_lift_count, (int, np.integer))
+            or self.pen_lift_count != max(0, len(walks) - 1)
+        ):
+            raise ValueError("pen-lift count must equal the number of transitions between walks")
+        if not isinstance(self.score, StrokeHypothesisScore):
+            raise TypeError("hypothesis score must be a StrokeHypothesisScore")
+        for name in ("route_ambiguous", "orientation_ambiguous", "component_order_ambiguous"):
+            if not isinstance(getattr(self, name), bool):
+                raise TypeError(f"{name} must be bool")
+        if not isinstance(self.repeat_required_by_hypothesis, bool):
+            raise TypeError("repeat_required_by_hypothesis must be bool")
+        if not isinstance(self.truncated, bool):
+            raise TypeError("truncated must be bool")
+        if self.repeat_required_by_hypothesis != bool(repeated):
+            raise ValueError("repeat flag must match repeated edge evidence")
+        pairings = tuple(self.junction_pairings)
+        if any(not isinstance(pairing, JunctionPairing) for pairing in pairings):
+            raise TypeError("junction pairings must be JunctionPairing values")
+        orientation = tuple(self.orientation_ambiguous_strokes)
+        if orientation and (
+            len(orientation) != len(walks)
+            or any(not isinstance(value, bool) for value in orientation)
+        ):
+            raise ValueError("per-stroke orientation ambiguity must match the walks")
+        object.__setattr__(self, "walks", walks)
+        object.__setattr__(self, "covered_edge_ids", frozenset(int(edge) for edge in covered))
+        object.__setattr__(self, "uncovered_edge_ids", frozenset(int(edge) for edge in uncovered))
+        object.__setattr__(self, "repeated_edge_ids", repeated)
+        object.__setattr__(self, "pen_lift_count", int(self.pen_lift_count))
+        object.__setattr__(self, "junction_pairings", pairings)
+        object.__setattr__(self, "orientation_ambiguous_strokes", orientation)
+
+    @property
+    def stroke_count(self) -> int:
+        """Number of graph walks in this explanation, not a claim of pen strokes."""
+        return len(self.walks)
+
+
+class StrokeSearchLimitError(RuntimeError):
+    """Raised when bounded search exceeds a configured limit.
+
+    The exception exposes ``limit_name``, ``configured_value``,
+    ``observed_value``, and ``search_stage``. Legacy aliases ``limit_value``,
+    ``observed``, and ``stage`` are also available.
+    """
+
+    def __init__(
+        self,
+        limit_name: str,
+        configured_value: int,
+        observed_value: int,
+        search_stage: str,
+    ) -> None:
+        self.limit_name = limit_name
+        self.configured_value = configured_value
+        self.observed_value = observed_value
+        self.search_stage = search_stage
+        self.limit_value = configured_value
+        self.observed = observed_value
+        self.stage = search_stage
+        super().__init__(
+            f"{search_stage} exceeded {limit_name}={configured_value} (observed {observed_value})"
+        )
+
+
+class JunctionPairingLimitError(StrokeSearchLimitError):
+    """Raised when junction-pairing enumeration exceeds its dedicated bound."""
 
 
 @dataclass(frozen=True)

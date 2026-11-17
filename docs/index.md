@@ -1,6 +1,6 @@
 # SkeletonPaths
 
-SkeletonPaths converts binary masks and precomputed skeletons into compact topology graphs and ranked candidate routes. It does **not** infer physical drawing order or pen direction.
+SkeletonPaths converts binary masks and precomputed skeletons into topology graphs, ranked routes, and bounded traversal/stroke-set hypotheses. It does **not** infer physical drawing order, pen direction, or original pen history.
 
 SkeletonPaths accepts images indexed as `[row, column]`, but all public geometric coordinates are returned as `(x, y) = (column, row)` in pixel units.
 
@@ -40,4 +40,4 @@ reference/behavior-contracts
 reference/api
 ```
 
-Start with the {doc}`getting-started` guide. The conceptual guides explain {doc}`guide/graph-construction`, {doc}`guide/path-selection`, {doc}`guide/ambiguity-and-ranking`, and {doc}`guide/search-limits`. See the {doc}`reference/behavior-contracts` and {doc}`reference/api` for exact guarantees and the supported package-root API. See the {doc}`changelog` for release history.
+Start with the {doc}`getting-started` guide, which covers mask analysis, route selection, and bounded multi-stroke hypotheses. The conceptual guides explain {doc}`guide/graph-construction`, {doc}`guide/path-selection`, {doc}`guide/ambiguity-and-ranking`, and {doc}`guide/search-limits`. See the {doc}`reference/behavior-contracts` and {doc}`reference/api` for exact guarantees and the supported package-root API. See the {doc}`changelog` for release history.

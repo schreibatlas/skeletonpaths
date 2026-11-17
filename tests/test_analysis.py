@@ -149,3 +149,32 @@ def test_analyze_mask_rejects_invalid_radius_and_exposes_graph_diagnostics():
     assert result.endpoint_count == result.graph.endpoint_count
     assert result.junction_count == result.graph.junction_count
     assert result.cycle_count == result.graph.cycle_count
+
+
+def test_analyze_mask_exposes_read_only_component_labels():
+    mask = np.zeros((20, 24), dtype=bool)
+    mask[2:5, 2:5] = True
+    mask[12:15, 17:20] = True
+
+    result = analyze_mask(mask)
+
+    assert result.component_labels is not None
+    assert result.component_labels.shape == mask.shape
+    assert set(np.unique(result.component_labels)) == {0, 1, 2}
+    assert result.component_labels[3, 3] != result.component_labels[13, 18]
+    assert not result.component_labels.flags.writeable
+
+
+def test_analyze_mask_accepts_pixel_suffixed_spur_threshold():
+    mask = _mask("branch")
+
+    legacy = analyze_mask(mask, min_spur_length=2.0)
+    pixel_suffixed = analyze_mask(mask, min_spur_length_px=2.0)
+
+    _assert_graphs_equal(legacy.graph, pixel_suffixed.graph)
+    _assert_graphs_equal(
+        graph_from_mask(mask, min_spur_length_px=2.0),
+        pixel_suffixed.graph,
+    )
+    with pytest.raises(ValueError, match="pass either"):
+        analyze_mask(mask, min_spur_length=2.0, min_spur_length_px=3.0)

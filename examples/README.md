@@ -13,6 +13,9 @@ python examples/05_mask_radius_confidence.py
 python examples/06_inventory_reranking.py
 python examples/07_planarcurve_interop.py
 python examples/08_route_ambiguity.py
+python examples/09_analyze_mask.py
+python examples/10_covering_walk.py
+python examples/11_stroke_hypotheses.py
 ```
 
 Examples 04 and 05 use image-processing dependencies. Install them with:
@@ -33,5 +36,8 @@ PlanarCurve is already a SkeletonPaths runtime dependency and needs no separate 
 | `06_inventory_reranking.py` | A selective open-route inventory reused with different endpoint constraints | One inventory supports multiple selections without enumerating other route kinds |
 | `07_planarcurve_interop.py` | A bent raster route passed to PlanarCurve | Resampling preserves the route as ordinary polyline geometry with a measurable turn cost |
 | `08_route_ambiguity.py` | Two equal routes and guide-based disambiguation | The unguided selection is ambiguous; the upper-route guide resolves it |
+| `09_analyze_mask.py` | Immutable mask analysis | Preserves mask dimensions and reports graph topology with radius evidence |
+| `10_covering_walk.py` | One deterministic connected graph-covering traversal | Repeated edges and directions are explicit without implying pen history |
+| `11_stroke_hypotheses.py` | Bounded ranked multi-walk hypotheses, disconnected components, and ambiguity | Candidate scores remain separate, and no hypothesis claims physical stroke order |
 
-The scripts are executable examples, not a promise that a selected route represents physical drawing direction. See the main README for topology, ranking, ambiguity, and search-limit contracts.
+The scripts demonstrate generic topology and traversal hypotheses, not recovered physical drawing direction or historical pen order. See the main README for scoring, ambiguity, and explicit search-limit contracts.

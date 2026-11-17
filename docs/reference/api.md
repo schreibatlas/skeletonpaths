@@ -30,6 +30,17 @@ The package root, `skeletonpaths`, is the supported import surface. The explicit
 .. autofunction:: skeletonpaths.covering_walk
 ```
 
+## Stroke hypotheses
+
+```{eval-rst}
+.. autofunction:: skeletonpaths.rank_covering_walks
+```
+
+```{eval-rst}
+.. autofunction:: skeletonpaths.stroke_hypotheses_from_analysis
+```
+
+
 ## Route enumeration, ranking, and selection
 
 ```{eval-rst}
@@ -97,6 +108,36 @@ The package root, `skeletonpaths`, is the supported import surface. The explicit
 
 ```{eval-rst}
 .. autoclass:: skeletonpaths.PathSearchLimits
+
+```
+
+```{eval-rst}
+.. autoclass:: skeletonpaths.RouteStep
+   :members:
+```
+
+```{eval-rst}
+.. autoclass:: skeletonpaths.JunctionPairing
+   :members:
+```
+
+```{eval-rst}
+.. autoclass:: skeletonpaths.StrokeHypothesis
+   :members:
+```
+
+```{eval-rst}
+.. autoclass:: skeletonpaths.StrokeHypothesisScore
+   :members:
+```
+
+```{eval-rst}
+.. autoclass:: skeletonpaths.StrokeSearchLimits
+```
+
+```{eval-rst}
+.. autoclass:: skeletonpaths.StrokeSearchPolicy
+   :members:
 ```
 
 ## Constants
@@ -115,6 +156,15 @@ The package root, `skeletonpaths`, is the supported import surface. The explicit
 .. autodata:: skeletonpaths.DEFAULT_SEARCH_LIMITS
 ```
 
+```{eval-rst}
+.. autodata:: skeletonpaths.DEFAULT_STROKE_SEARCH_LIMITS
+   :no-index:
+```
+
+```{eval-rst}
+.. autodata:: skeletonpaths.DEFAULT_STROKE_SEARCH_POLICY
+```
+
 ## Errors
 
 ```{eval-rst}
@@ -127,6 +177,17 @@ The package root, `skeletonpaths`, is the supported import surface. The explicit
 
 ```{eval-rst}
 .. autoclass:: skeletonpaths.PathSearchLimitError
+
+```
+
+```{eval-rst}
+.. autoclass:: skeletonpaths.StrokeSearchLimitError
+   :members:
+```
+
+```{eval-rst}
+.. autoclass:: skeletonpaths.JunctionPairingLimitError
+   :members:
 ```
 
 ## Deprecated compatibility wrappers

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "skeletonpaths"
-description = "Skeleton graphs and candidate path extraction from binary masks and skeletons."
+description = "Skeleton topology and bounded traversal hypotheses from binary masks and skeletons."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
