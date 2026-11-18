@@ -1,0 +1,26 @@
+rows:
+- sha: b8c560a35303bb4f8b1498b3981b724448e4aa0b
+  inspected: true
+  inspected_paths:
+  - skeletonpaths/hypotheses.py
+  - skeletonpaths/model.py
+  - skeletonpaths/image.py
+  - skeletonpaths/core.py
+  - skeletonpaths/__init__.py
+  - docs/reference/api.md
+  - examples/11_stroke_hypotheses.py
+  - tests/test_analysis.py
+  - tests/test_covering_walks.py
+  - tests/test_junction_pairing.py
+  - tests/test_multistroke.py
+  - tests/test_retracing.py
+  - tests/test_stroke_search_limits.py
+  - tests/test_walks.py
+  observed_behavior: >-
+    Adds ranked multi-walk skeleton stroke hypotheses with junction-pairing and repeated-edge alternatives, guide-based orientation and ranking, and explicit bounded-search and ambiguity metadata. Adds oriented route steps, component labels, and a pixel-suffixed spur-threshold alias.
+  public_impact: public
+  decision: accepted
+  target_entry_key: null
+  target_entry_id: null
+  notes: Reviewed implementation, public API documentation, example, and focused tests.
+  stale: false

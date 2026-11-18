@@ -1,0 +1,47 @@
+schema: releaseledger.entry-batch.v1
+operation: create
+schema_version: 1
+object_type: release_entry_batch
+release_version: v0.1.3
+git_base_ref: c977e6b1ce95cc3f4d6f57737d467803e986f352
+git_base_sha: c977e6b1ce95cc3f4d6f57737d467803e986f352
+git_head_ref: b8c560a35303bb4f8b1498b3981b724448e4aa0b
+git_head_sha: b8c560a35303bb4f8b1498b3981b724448e4aa0b
+include_merges: nontrivial
+entries:
+- kind: added
+  summary: Added ranked stroke hypotheses with junction alternatives, oriented walks, guide matching, and bounded searches
+  status: accepted
+  source_refs:
+  - git:b8c560a35303bb4f8b1498b3981b724448e4aa0b
+  paths:
+  - skeletonpaths/hypotheses.py
+  - skeletonpaths/model.py
+  - docs/reference/api.md
+  - examples/11_stroke_hypotheses.py
+  - tests/test_covering_walks.py
+  - tests/test_junction_pairing.py
+  - tests/test_multistroke.py
+  - tests/test_retracing.py
+  - tests/test_stroke_search_limits.py
+  - tests/test_walks.py
+  sources: []
+  prs: []
+  issues: []
+  contributors:
+  - '@holgern'
+- kind: added
+  summary: Added component labels and a pixel-suffixed spur threshold option to mask analysis
+  status: accepted
+  source_refs: []
+  paths:
+  - skeletonpaths/image.py
+  - skeletonpaths/model.py
+  - docs/reference/api.md
+  - tests/test_analysis.py
+  sources:
+  - git:b8c560a35303bb4f8b1498b3981b724448e4aa0b
+  prs: []
+  issues: []
+  contributors:
+  - '@holgern'
