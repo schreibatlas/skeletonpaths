@@ -1,0 +1,2281 @@
+ benchmarks/benchmark_subpixel.py | 192 ++++++++
+ docs/index.md                    |   3 +-
+ docs/reference/api.md            |  46 ++
+ docs/subpixel-centerlines.md     |  76 ++++
+ skeletonpaths/__init__.py        |  18 +
+ skeletonpaths/core.py            |  20 +
+ skeletonpaths/model.py           | 291 ++++++++++++
+ skeletonpaths/subpixel.py        | 928 +++++++++++++++++++++++++++++++++++++++
+ tests/test_benchmark_subpixel.py |  32 ++
+ tests/test_subpixel.py           | 505 +++++++++++++++++++++
+ 10 files changed, 2110 insertions(+), 1 deletion(-)
+
+diff --git a/benchmarks/benchmark_subpixel.py b/benchmarks/benchmark_subpixel.py
+new file mode 100644
+index 0000000..e3ffa45
+--- /dev/null
++++ b/benchmarks/benchmark_subpixel.py
+@@ -0,0 +1,192 @@
++"""Measure bounded subpixel reconstruction work on a deterministic synthetic glyph."""
++
++from __future__ import annotations
++
++import argparse
++import json
++import statistics
++import time
++import tracemalloc
++from typing import Any
++
++import numpy as np
++
++from skeletonpaths import SubpixelCenterlineOptions, analyze_mask, refine_graph_geometry
++
++
++def _capsule_field(
++    shape: tuple[int, int], start: tuple[float, float], end: tuple[float, float], radius: float
++) -> np.ndarray:
++    y, x = np.mgrid[: shape[0], : shape[1]]
++    points = np.stack((x, y), axis=-1)
++    first = np.asarray(start, dtype=float)
++    vector = np.asarray(end, dtype=float) - first
++    parameter = np.clip(
++        np.sum((points - first) * vector, axis=-1) / np.dot(vector, vector),
++        0.0,
++        1.0,
++    )
++    nearest = first + parameter[..., None] * vector
++    return radius - np.linalg.norm(points - nearest, axis=-1)
++
++
++def _glyph_field(side: int) -> np.ndarray:
++    """Build a signed-field A-shaped glyph inside a square crop."""
++    top = (0.5 * side, 0.12 * side)
++    left_foot = (0.18 * side, 0.84 * side)
++    right_foot = (0.82 * side, 0.84 * side)
++    crossbar_start = (0.36 * side, 0.60 * side)
++    crossbar_end = (0.64 * side, 0.60 * side)
++    radius = max(2.0, 0.035 * side)
++    strokes = (
++        _capsule_field((side, side), top, left_foot, radius),
++        _capsule_field((side, side), top, right_foot, radius),
++        _capsule_field((side, side), crossbar_start, crossbar_end, radius),
++    )
++    return np.maximum.reduce(strokes)
++
++
++def _retained_edge_array_bytes(geometry: Any) -> int:
++    return sum(
++        array.nbytes
++        for edge in geometry.edges
++        for array in (edge.xy, edge.tangent, edge.curvature, edge.radius_px, edge.confidence)
++    )
++
++
++def _analysis_array_bytes(analysis: Any, decision_field: np.ndarray) -> int:
++    arrays = [
++        analysis.mask,
++        analysis.skeleton,
++        analysis.radius,
++        analysis.confidence,
++        decision_field,
++    ]
++    if analysis.component_labels is not None:
++        arrays.append(analysis.component_labels)
++    return sum(array.nbytes for array in arrays)
++
++
++def _timed_run(field: np.ndarray, options: SubpixelCenterlineOptions) -> tuple[float, Any, int]:
++    started = time.perf_counter()
++    analysis = analyze_mask(field > 0.0)
++    geometry = refine_graph_geometry(analysis, decision_field=field, options=options)
++    elapsed = time.perf_counter() - started
++    return elapsed, geometry, _analysis_array_bytes(analysis, field)
++
++
++def _peak_traced_bytes(field: np.ndarray, options: SubpixelCenterlineOptions) -> int:
++    tracemalloc.start()
++    try:
++        analysis = analyze_mask(field > 0.0)
++        refine_graph_geometry(analysis, decision_field=field, options=options)
++        _, peak_bytes = tracemalloc.get_traced_memory()
++    finally:
++        tracemalloc.stop()
++    return peak_bytes
++
++
++def run_benchmark(side: int, repeats: int) -> dict[str, Any]:
++    field = _glyph_field(side)
++    options = SubpixelCenterlineOptions(
++        max_refinement_samples=100_000,
++        max_normal_probes=1_000_000,
++    )
++
++    # Warm up lazy spline imports and native-library initialization before timing.
++    analysis = analyze_mask(field > 0.0)
++    refine_graph_geometry(analysis, decision_field=field, options=options)
++
++    runtimes: list[float] = []
++    sample_counts: list[int] = []
++    probe_counts: list[int] = []
++    probes_per_point: list[float] = []
++    fits_per_edge: list[int] = []
++    last_geometry = None
++    analysis_bytes = 0
++    for _ in range(repeats):
++        elapsed, geometry, analysis_bytes = _timed_run(field, options)
++        runtimes.append(elapsed)
++        sample_counts.append(int(geometry.diagnostics["refinement_sample_count"]))
++        probe_counts.append(int(geometry.diagnostics["normal_probe_count"]))
++        probes_per_point.extend(
++            edge.diagnostics.normal_probe_count / max(1, edge.diagnostics.raw_point_count)
++            for edge in geometry.edges
++        )
++        fits_per_edge.extend(edge.diagnostics.spline_fit_count for edge in geometry.edges)
++        last_geometry = geometry
++    peak_traced_bytes = _peak_traced_bytes(field, options)
++    assert last_geometry is not None
++    retained_geometry_bytes = _retained_edge_array_bytes(last_geometry)
++    return {
++        "configuration": {
++            "side_px": side,
++            "repeats": repeats,
++            "warmup_runs": 1,
++            "memory_measurement_runs": 1,
++        },
++        "runtime_seconds_per_glyph_crop": {
++            "median": statistics.median(runtimes),
++            "minimum": min(runtimes),
++            "maximum": max(runtimes),
++        },
++        "work": {
++            "edge_count": len(last_geometry.edges),
++            "peak_refinement_sample_count": max(sample_counts),
++            "peak_normal_probe_count": max(probe_counts),
++            "median_cross_section_probes_per_edge_point": statistics.median(probes_per_point),
++            "median_spline_fits_per_edge": statistics.median(fits_per_edge),
++        },
++        "memory": {
++            "analysis_and_field_array_bytes": analysis_bytes,
++            "retained_refined_geometry_array_bytes": retained_geometry_bytes,
++            "refined_to_analysis_array_ratio": retained_geometry_bytes / max(1, analysis_bytes),
++            "peak_traced_bytes": peak_traced_bytes,
++            "measurement_note": (
++                "peak_traced_bytes uses a separate run so tracing does not affect runtime; "
++                "array byte totals exclude Python and PlanarCurve object overhead."
++            ),
++        },
++    }
++
++
++def _parse_args() -> argparse.Namespace:
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument(
++        "--side", type=int, default=128, help="square crop side in pixels (64..512)"
++    )
++    parser.add_argument("--repeats", type=int, default=3, help="measured runs (1..20)")
++    parser.add_argument("--json", action="store_true", help="emit the full machine-readable report")
++    args = parser.parse_args()
++    if not 64 <= args.side <= 512:
++        parser.error("--side must be between 64 and 512")
++    if not 1 <= args.repeats <= 20:
++        parser.error("--repeats must be between 1 and 20")
++    return args
++
++
++def main() -> int:
++    args = _parse_args()
++    report = run_benchmark(args.side, args.repeats)
++    if args.json:
++        print(json.dumps(report, indent=2, sort_keys=True))
++    else:
++        runtime = report["runtime_seconds_per_glyph_crop"]["median"]
++        work = report["work"]
++        memory = report["memory"]
++        print(f"Median runtime per glyph crop: {runtime:.6f} s")
++        print(f"Peak refinement samples: {work['peak_refinement_sample_count']}")
++        print(
++            "Median cross-section probes per edge point: "
++            f"{work['median_cross_section_probes_per_edge_point']:.2f}"
++        )
++        print(f"Median spline fits per edge: {work['median_spline_fits_per_edge']:.1f}")
++        print(
++            "Retained refined geometry array bytes: "
++            f"{memory['retained_refined_geometry_array_bytes']}"
++        )
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/docs/index.md b/docs/index.md
+index 1945e6e..4fdd807 100644
+--- a/docs/index.md
++++ b/docs/index.md
+@@ -36,8 +36,9 @@ guide/path-selection
+ guide/ambiguity-and-ranking
+ guide/search-limits
+ guide/planarcurve
++subpixel-centerlines
+ reference/behavior-contracts
+ reference/api
+ ```
+
+-Start with the {doc}`getting-started` guide, which covers mask analysis, route selection, and bounded multi-stroke hypotheses. The conceptual guides explain {doc}`guide/graph-construction`, {doc}`guide/path-selection`, {doc}`guide/ambiguity-and-ranking`, and {doc}`guide/search-limits`. See the {doc}`reference/behavior-contracts` and {doc}`reference/api` for exact guarantees and the supported package-root API. See the {doc}`changelog` for release history.
++Start with the {doc}`getting-started` guide, which covers mask analysis, route selection, and bounded multi-stroke hypotheses. The conceptual guides explain {doc}`guide/graph-construction`, {doc}`guide/path-selection`, {doc}`guide/ambiguity-and-ranking`, {doc}`guide/search-limits`, {doc}`guide/planarcurve`, and {doc}`subpixel-centerlines`. See the {doc}`reference/behavior-contracts` and {doc}`reference/api` for exact guarantees and the supported package-root API. See the {doc}`changelog` for release history.
+diff --git a/docs/reference/api.md b/docs/reference/api.md
+index 23e099c..aa5c1c9 100644
+--- a/docs/reference/api.md
++++ b/docs/reference/api.md
+@@ -42,6 +42,41 @@ The package root, `skeletonpaths`, is the supported import surface. The explicit
+
+
+ ## Route enumeration, ranking, and selection
++## Subpixel centerline geometry
++
++```{eval-rst}
++.. autofunction:: skeletonpaths.refine_graph_geometry
++```
++
++```{eval-rst}
++.. autofunction:: skeletonpaths.refined_walk
++```
++
++```{eval-rst}
++.. autoclass:: skeletonpaths.SubpixelCenterlineOptions
++   :members:
++```
++
++```{eval-rst}
++.. autoclass:: skeletonpaths.RefinedEdgeDiagnostics
++   :members:
++```
++
++```{eval-rst}
++.. autoclass:: skeletonpaths.RefinedEdgeGeometry
++   :members:
++```
++
++```{eval-rst}
++.. autoclass:: skeletonpaths.RefinedSkeletonGeometry
++   :members:
++```
++
++```{eval-rst}
++.. autoclass:: skeletonpaths.RefinedWalkGeometry
++   :members:
++```
++
+
+ ```{eval-rst}
+ .. autofunction:: skeletonpaths.prepare_topology_paths
+@@ -190,6 +225,17 @@ The package root, `skeletonpaths`, is the supported import surface. The explicit
+    :members:
+ ```
+
++## Subpixel reconstruction errors
++
++```{eval-rst}
++.. autoclass:: skeletonpaths.SubpixelReconstructionError
++```
++
++```{eval-rst}
++.. autoclass:: skeletonpaths.SubpixelReconstructionLimitError
++   :members:
++```
++
+ ## Deprecated compatibility wrappers
+
+ These names remain available for compatibility and emit `DeprecationWarning`. Prefer `rank_paths()` and `select_path()`.
+diff --git a/docs/subpixel-centerlines.md b/docs/subpixel-centerlines.md
+new file mode 100644
+index 0000000..2191b89
+--- /dev/null
++++ b/docs/subpixel-centerlines.md
+@@ -0,0 +1,76 @@
++# Subpixel centerline reconstruction
++
++SkeletonPaths keeps raster topology and continuous geometry separate. The default graph, paths, and walks remain pixel-based. Call `refine_graph_geometry()` only when downstream work needs a continuous estimate of the medial centerline.
++
++## Pipeline
++
++```text
++binary mask
++-> raster skeleton
++-> topology graph
++-> discrete route
++-> subpixel edge observations
++-> regularized continuous edge geometry
++-> refined route/walk geometry
++```
++
++The continuous layer is additive. It does not change `SkeletonNode.xy`, `SkeletonEdge.xy`, `SkeletonPath.xy`, or `SkeletonWalk.xy`, nor does it alter graph connectivity, edge IDs, route ordering, or ambiguity metadata.
++
++All coordinates are `(x, y) = (column, row)` in pixel units. Array samples are treated as values at pixel centers.
++
++## Basic use
++
++Pass a `SkeletonAnalysis` and, when available, a signed decision field from the segmentation stage:
++
++```python
++from skeletonpaths import analyze_mask, covering_walk, refine_graph_geometry, refined_walk
++
++analysis = analyze_mask(mask)
++geometry = refine_graph_geometry(analysis, decision_field=signed_field)
++walk = covering_walk(analysis.graph)
++walk_geometry = refined_walk(geometry, walk)
++```
++```
++
++The decision field must be a finite 2D numeric array with the same shape as the mask. Positive values mean inside the stroke, negative values mean outside, and zero is the boundary. The field is sampled bilinearly along bounded edge-normal probes. It may be a signed distance field or another smooth, signed segmentation field. It should describe the same foreground used to produce `analysis`.
++
++Without `decision_field`, SkeletonPaths derives a signed-distance field from the mask. This deterministic fallback uses SciPy and is reported as `binary-distance-fallback` in edge results. Install the image extra for the fallback and image analysis dependencies. PlanarCurve's SciPy-dependent spline fitting is loaded lazily when refinement is requested.
++
++## Geometry and diagnostics
++
++`RefinedSkeletonGeometry.edges` is in original graph edge order. Each `RefinedEdgeGeometry` retains its graph `edge_id` and contains:
++
++- `xy`: subpixel samples of the fitted centerline;
++- `tangent`: unit tangent vectors from the fitted curve's first derivative;
++- `curvature`: signed curvature from the fitted curve's derivatives, in inverse pixel units;
++- `radius_px`: estimated local stroke half-width;
++- `confidence`: bounded evidence scores in `[0, 1]`;
++- `source` and `diagnostics`: field provenance, rejected-observation reasons, shifts, residuals, fit counts, and bounded probe counts.
++
++Confidence combines a boundary-gradient score and agreement between the observed half-width and the raster distance-transform radius. It is an evidence score, not a probability that a route or interpretation is correct. Weak gradients, competing crossings, radius disagreement, junction guards, and curvature-radius checks are reported as invalid reasons rather than silently treated as precise observations.
++
++Shared topology nodes have one refined coordinate in `geometry.node_xy`, reused by all incident refined edges. Junction neighborhoods are guarded against ambiguous cross-sections. A pure loop may be fit as two open spline segments around a deterministic internal split; that split is not exposed as a graph node and does not change cycle or edge identity.
++
++PlanarCurve's public `fit_polyline_spline()` API selects a bounded number of controls and provides the analytic differential geometry. `SubpixelCenterlineOptions` controls probe spacing and range, tangent window, junction guard, confidence thresholds, fit passes, output spacing, curvature-radius rejection, and work budgets. `max_refinement_samples` and `max_normal_probes` bound work; exceeding either raises `SubpixelReconstructionLimitError`.
++
++## Refined walks
++
++`refined_walk(geometry, walk)` follows the exact edge IDs and directions in the existing discrete walk. It does not fit a new spline through the whole route. Reverse traversal reverses the cached samples, negates tangent and signed curvature, and retains radius and confidence. Repeated traversals reuse the same edge geometry. The returned `RefinedWalkGeometry` keeps `edge_ids` and `edge_directions` for traceability. An optional `sample_count` resamples each edge traversal before shared endpoints are joined.
++
++A refined route is still a geometric representation, not evidence of a writer's pen direction, stroke chronology, or intended route. Existing route ambiguity remains visible and unchanged.
++
++## Limitations and InkGrammar handoff
++
++This process estimates the medial geometry supported by the observed raster stroke. It cannot recover unavailable temporal information, prove historical pen direction, infer where a pen lifted, or resolve an ambiguous route. Smooth fitting never unions or splits topology. Junctions, touching strokes, loops, weak boundaries, and narrow features can have lower confidence or rejected observations. Inspect diagnostics when geometry quality matters.
++
++Applications may pass refined geometry to InkGrammar as geometric evidence. That handoff does not make the geometry a historical trajectory or establish stroke order. SkeletonPaths has no InkGrammar runtime dependency and does not infer letter identity, handwriting scores, or stroke outlines.
++
++## Bounded benchmark
++
++Run the deterministic A-shaped crop benchmark from the repository root:
++
++```console
++python benchmarks/benchmark_subpixel.py --side 128 --repeats 3 --json
++```
++
++`--side` is bounded to 64..512 pixels and `--repeats` to 1..20. The report includes median runtime per crop, peak refinement samples and normal probes, median cross-section probes per edge point, median spline fits per edge, retained refined-geometry array bytes, analysis-array bytes, and peak Python allocator tracing. Array byte totals exclude Python and PlanarCurve object overhead. The benchmark uses a warm-up run before timing, a separate traced memory pass, and fixed refinement work limits; its timings are comparative measurements, not performance guarantees.
+diff --git a/skeletonpaths/__init__.py b/skeletonpaths/__init__.py
+index 26c4e19..0a61ed4 100644
+--- a/skeletonpaths/__init__.py
++++ b/skeletonpaths/__init__.py
+@@ -19,6 +19,10 @@ from .core import (
+     PathSearchLimitError,
+     PathSearchLimits,
+     PathSelection,
++    RefinedEdgeDiagnostics,
++    RefinedEdgeGeometry,
++    RefinedSkeletonGeometry,
++    RefinedWalkGeometry,
+     RouteStep,
+     SkeletonAnalysis,
+     SkeletonEdge,
+@@ -32,6 +36,9 @@ from .core import (
+     StrokeSearchLimitError,
+     StrokeSearchLimits,
+     StrokeSearchPolicy,
++    SubpixelCenterlineOptions,
++    SubpixelReconstructionError,
++    SubpixelReconstructionLimitError,
+     TopologyPathInventory,
+     TopologyRoute,
+     analyze_mask,
+@@ -44,6 +51,8 @@ from .core import (
+     rank_covering_walks,
+     rank_paths,
+     rank_topology_paths,
++    refine_graph_geometry,
++    refined_walk,
+     select_path,
+     select_topology_path,
+     stroke_hypotheses_from_analysis,
+@@ -69,6 +78,10 @@ __all__ = [
+     "PathSearchLimitError",
+     "PathSearchLimits",
+     "PathSelection",
++    "RefinedEdgeDiagnostics",
++    "RefinedEdgeGeometry",
++    "RefinedSkeletonGeometry",
++    "RefinedWalkGeometry",
+     "RouteStep",
+     "SkeletonAnalysis",
+     "SkeletonEdge",
+@@ -82,6 +95,9 @@ __all__ = [
+     "StrokeSearchLimitError",
+     "StrokeSearchLimits",
+     "StrokeSearchPolicy",
++    "SubpixelCenterlineOptions",
++    "SubpixelReconstructionError",
++    "SubpixelReconstructionLimitError",
+     "TopologyPathInventory",
+     "TopologyRoute",
+     "__version__",
+@@ -95,6 +111,8 @@ __all__ = [
+     "rank_covering_walks",
+     "rank_paths",
+     "rank_topology_paths",
++    "refine_graph_geometry",
++    "refined_walk",
+     "select_path",
+     "select_topology_path",
+     "stroke_hypotheses_from_analysis",
+diff --git a/skeletonpaths/core.py b/skeletonpaths/core.py
+index c2d0868..4a4fa71 100644
+--- a/skeletonpaths/core.py
++++ b/skeletonpaths/core.py
+@@ -20,6 +20,10 @@ from .model import (
+     PathSearchLimitError,
+     PathSearchLimits,
+     PathSelection,
++    RefinedEdgeDiagnostics,
++    RefinedEdgeGeometry,
++    RefinedSkeletonGeometry,
++    RefinedWalkGeometry,
+     RouteStep,
+     SkeletonAnalysis,
+     SkeletonEdge,
+@@ -33,11 +37,18 @@ from .model import (
+     StrokeSearchLimitError,
+     StrokeSearchLimits,
+     StrokeSearchPolicy,
++    SubpixelCenterlineOptions,
+     TopologyPathInventory,
+     TopologyRoute,
+ )
+ from .ranking import rank_paths, rank_topology_paths, select_path, select_topology_path
+ from .routing import prepare_topology_paths
++from .subpixel import (
++    SubpixelReconstructionError,
++    SubpixelReconstructionLimitError,
++    refine_graph_geometry,
++    refined_walk,
++)
+ from .walk import DisconnectedGraphError, covering_walk
+
+ __all__ = [
+@@ -55,6 +66,10 @@ __all__ = [
+     "PathSearchLimitError",
+     "PathSearchLimits",
+     "PathSelection",
++    "RefinedEdgeDiagnostics",
++    "RefinedEdgeGeometry",
++    "RefinedSkeletonGeometry",
++    "RefinedWalkGeometry",
+     "RouteStep",
+     "SkeletonAnalysis",
+     "SkeletonEdge",
+@@ -68,6 +83,9 @@ __all__ = [
+     "StrokeSearchLimitError",
+     "StrokeSearchLimits",
+     "StrokeSearchPolicy",
++    "SubpixelCenterlineOptions",
++    "SubpixelReconstructionError",
++    "SubpixelReconstructionLimitError",
+     "TopologyPathInventory",
+     "TopologyRoute",
+     "analyze_mask",
+@@ -80,6 +98,8 @@ __all__ = [
+     "rank_covering_walks",
+     "rank_paths",
+     "rank_topology_paths",
++    "refine_graph_geometry",
++    "refined_walk",
+     "select_path",
+     "select_topology_path",
+     "stroke_hypotheses_from_analysis",
+diff --git a/skeletonpaths/model.py b/skeletonpaths/model.py
+index 7e2b29a..e5d31ce 100644
+--- a/skeletonpaths/model.py
++++ b/skeletonpaths/model.py
+@@ -1179,3 +1179,294 @@ class TopologyPathInventory:
+                 if current != route.end_node:
+                     raise ValueError("route endpoints do not match its edge sequence")
+         object.__setattr__(self, "paths_by_kind", MappingProxyType(paths_by_kind))
++
++
++@dataclass(frozen=True)
++class SubpixelCenterlineOptions:
++    """Bounded controls for reconstructing continuous centerline geometry."""
++
++    normal_sample_step_px: float = 0.125
++    max_normal_search_px: float | None = None
++    tangent_window_px: float = 4.0
++    junction_guard_px: float = 2.0
++    min_boundary_gradient: float = 0.02
++    min_sample_confidence: float = 0.05
++    refinement_passes: int = 2
++    spline_options: object | None = None
++    output_spacing_px: float = 0.25
++    max_curvature_radius: float = 0.8
++    max_refinement_samples: int = 100_000
++    max_normal_probes: int = 2_000_000
++
++    def __post_init__(self) -> None:
++        for name in (
++            "normal_sample_step_px",
++            "tangent_window_px",
++            "output_spacing_px",
++            "max_curvature_radius",
++        ):
++            value = getattr(self, name)
++            if not np.isfinite(value) or value <= 0.0:
++                raise ValueError(f"{name} must be finite and positive")
++            object.__setattr__(self, name, float(value))
++        for name in ("junction_guard_px", "min_boundary_gradient"):
++            value = getattr(self, name)
++            if not np.isfinite(value) or value < 0.0:
++                raise ValueError(f"{name} must be finite and nonnegative")
++            object.__setattr__(self, name, float(value))
++        if self.max_normal_search_px is not None:
++            if (
++                not np.isfinite(self.max_normal_search_px)
++                or self.max_normal_search_px <= 0.0
++                or self.max_normal_search_px > 64.0
++            ):
++                raise ValueError("max_normal_search_px must be positive and no greater than 64")
++            object.__setattr__(self, "max_normal_search_px", float(self.max_normal_search_px))
++        if (
++            not np.isfinite(self.min_sample_confidence)
++            or not 0.0 <= self.min_sample_confidence <= 1.0
++        ):
++            raise ValueError("min_sample_confidence must be between zero and one")
++        if (
++            isinstance(self.refinement_passes, bool)
++            or not isinstance(self.refinement_passes, (int, np.integer))
++            or not 1 <= self.refinement_passes <= 3
++        ):
++            raise ValueError("refinement_passes must be an integer between one and three")
++        if (
++            isinstance(self.max_refinement_samples, bool)
++            or not isinstance(self.max_refinement_samples, (int, np.integer))
++            or self.max_refinement_samples < 1
++        ):
++            raise ValueError("max_refinement_samples must be a positive integer")
++        object.__setattr__(self, "refinement_passes", int(self.refinement_passes))
++        object.__setattr__(self, "max_refinement_samples", int(self.max_refinement_samples))
++        if (
++            isinstance(self.max_normal_probes, bool)
++            or not isinstance(self.max_normal_probes, (int, np.integer))
++            or self.max_normal_probes < 1
++        ):
++            raise ValueError("max_normal_probes must be a positive integer")
++        object.__setattr__(self, "max_normal_probes", int(self.max_normal_probes))
++
++
++def _subpixel_array(values: object, *, name: str, columns: int | None = None) -> np.ndarray:
++    array = np.array(values, dtype=float, copy=True)
++    if array.ndim != (2 if columns is not None else 1):
++        raise ValueError(f"{name} must have {2 if columns is not None else 1} dimensions")
++    if columns is not None and array.shape[1] != columns:
++        raise ValueError(f"{name} must have shape (N, {columns})")
++    if not np.isfinite(array).all():
++        raise ValueError(f"{name} must contain only finite values")
++    array.setflags(write=False)
++    return array
++
++
++@dataclass(frozen=True)
++class RefinedEdgeDiagnostics:
++    """Bounded evidence and fitting diagnostics for one refined edge."""
++
++    raw_point_count: int
++    valid_cross_section_count: int
++    invalid_reason_counts: Mapping[str, int]
++    median_shift_px: float
++    p95_shift_px: float
++    median_spline_residual_px: float
++    p95_spline_residual_px: float
++    selected_control_count: int
++    first_pass_improvement_px: float
++    junction_guard_sample_count: int
++    max_abs_curvature_radius: float
++    normal_probe_count: int
++    spline_fit_count: int
++
++    def __post_init__(self) -> None:
++        for name in (
++            "raw_point_count",
++            "valid_cross_section_count",
++            "selected_control_count",
++            "junction_guard_sample_count",
++            "normal_probe_count",
++            "spline_fit_count",
++        ):
++            value = getattr(self, name)
++            if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or value < 0:
++                raise ValueError(f"{name} must be a nonnegative integer")
++            object.__setattr__(self, name, int(value))
++        if self.valid_cross_section_count > self.raw_point_count:
++            raise ValueError("valid cross-section count cannot exceed the raw point count")
++        for name in (
++            "median_shift_px",
++            "p95_shift_px",
++            "median_spline_residual_px",
++            "p95_spline_residual_px",
++            "max_abs_curvature_radius",
++        ):
++            value = getattr(self, name)
++            if not np.isfinite(value) or value < 0.0:
++                raise ValueError(f"{name} must be finite and nonnegative")
++            object.__setattr__(self, name, float(value))
++        if not np.isfinite(self.first_pass_improvement_px):
++            raise ValueError("first_pass_improvement_px must be finite")
++        object.__setattr__(self, "first_pass_improvement_px", float(self.first_pass_improvement_px))
++        reasons = dict(self.invalid_reason_counts)
++        if any(not isinstance(key, str) or not key for key in reasons):
++            raise ValueError("invalid reason names must be nonempty strings")
++        if any(
++            isinstance(count, bool) or not isinstance(count, (int, np.integer)) or count < 0
++            for count in reasons.values()
++        ):
++            raise ValueError("invalid reason counts must be nonnegative integers")
++        object.__setattr__(
++            self,
++            "invalid_reason_counts",
++            MappingProxyType({key: int(value) for key, value in reasons.items()}),
++        )
++
++
++@dataclass(frozen=True)
++class RefinedEdgeGeometry:
++    """Continuous geometry for one graph edge in ``(column, row)`` coordinates."""
++
++    edge_id: int
++    xy: np.ndarray
++    tangent: np.ndarray
++    curvature: np.ndarray
++    radius_px: np.ndarray
++    confidence: np.ndarray
++    length_px: float
++    source: Literal["decision-field", "binary-distance-fallback"]
++    diagnostics: RefinedEdgeDiagnostics
++    curve_segments: tuple[object, ...] = ()
++
++    def __post_init__(self) -> None:
++        if (
++            isinstance(self.edge_id, bool)
++            or not isinstance(self.edge_id, (int, np.integer))
++            or self.edge_id < 0
++        ):
++            raise ValueError("edge_id must be a nonnegative integer")
++        xy = _subpixel_array(self.xy, name="xy", columns=2)
++        tangent = _subpixel_array(self.tangent, name="tangent", columns=2)
++        curvature = _subpixel_array(self.curvature, name="curvature")
++        radius = _subpixel_array(self.radius_px, name="radius_px")
++        confidence = _subpixel_array(self.confidence, name="confidence")
++        if len(xy) < 2:
++            raise ValueError("refined edge geometry must contain at least two points")
++        if any(len(values) != len(xy) for values in (tangent, curvature, radius, confidence)):
++            raise ValueError("refined edge geometry arrays must have matching lengths")
++        if np.any(radius < 0.0):
++            raise ValueError("radius_px must be nonnegative")
++        if np.any((confidence < 0.0) | (confidence > 1.0)):
++            raise ValueError("confidence must be between zero and one")
++        if not np.isfinite(self.length_px) or self.length_px <= 0.0:
++            raise ValueError("length_px must be finite and positive")
++        if self.source not in {"decision-field", "binary-distance-fallback"}:
++            raise ValueError("unsupported refined edge source")
++        if not isinstance(self.diagnostics, RefinedEdgeDiagnostics):
++            raise TypeError("diagnostics must be RefinedEdgeDiagnostics")
++        curves = tuple(self.curve_segments)
++        object.__setattr__(self, "edge_id", int(self.edge_id))
++        object.__setattr__(self, "xy", xy)
++        object.__setattr__(self, "tangent", tangent)
++        object.__setattr__(self, "curvature", curvature)
++        object.__setattr__(self, "radius_px", radius)
++        object.__setattr__(self, "confidence", confidence)
++        object.__setattr__(self, "length_px", float(self.length_px))
++        object.__setattr__(self, "curve_segments", curves)
++
++
++@dataclass(frozen=True)
++class RefinedSkeletonGeometry:
++    """Refined edge geometries tied to their unchanged discrete skeleton graph."""
++
++    analysis: SkeletonAnalysis
++    edges: tuple[RefinedEdgeGeometry, ...]
++    node_xy: Mapping[int, Point]
++    node_confidence: Mapping[int, float]
++    node_radius_px: Mapping[int, float]
++    diagnostics: Mapping[str, int | float | str]
++
++    def __post_init__(self) -> None:
++        if not isinstance(self.analysis, SkeletonAnalysis):
++            raise TypeError("analysis must be a SkeletonAnalysis")
++        edges = tuple(self.edges)
++        if any(not isinstance(edge, RefinedEdgeGeometry) for edge in edges):
++            raise TypeError("edges must contain RefinedEdgeGeometry values")
++        edge_ids = tuple(edge.edge_id for edge in edges)
++        if len(edges) != len(self.analysis.graph.edges) or edge_ids != tuple(range(len(edges))):
++            raise ValueError("refined edges must preserve every graph edge ID in order")
++        node_ids = {node.id for node in self.analysis.graph.nodes}
++        node_xy = {
++            int(key): (float(value[0]), float(value[1])) for key, value in self.node_xy.items()
++        }
++        node_confidence = {int(key): float(value) for key, value in self.node_confidence.items()}
++        node_radius = {int(key): float(value) for key, value in self.node_radius_px.items()}
++        if any(set(values) != node_ids for values in (node_xy, node_confidence, node_radius)):
++            raise ValueError("refined node maps must contain exactly the graph node IDs")
++        if any(not np.isfinite(point).all() for point in node_xy.values()):
++            raise ValueError("refined node coordinates must be finite")
++        if any(
++            not np.isfinite(value) or not 0.0 <= value <= 1.0 for value in node_confidence.values()
++        ):
++            raise ValueError("node confidence must be between zero and one")
++        if any(not np.isfinite(value) or value < 0.0 for value in node_radius.values()):
++            raise ValueError("node radius must be finite and nonnegative")
++        object.__setattr__(self, "edges", edges)
++        object.__setattr__(self, "node_xy", MappingProxyType(node_xy))
++        object.__setattr__(self, "node_confidence", MappingProxyType(node_confidence))
++        object.__setattr__(self, "node_radius_px", MappingProxyType(node_radius))
++        object.__setattr__(self, "diagnostics", MappingProxyType(dict(self.diagnostics)))
++
++    @property
++    def graph(self) -> SkeletonGraph:
++        """The unchanged discrete graph from the source analysis."""
++        return self.analysis.graph
++
++    @property
++    def edge_by_id(self) -> Mapping[int, RefinedEdgeGeometry]:
++        """Immutable edge lookup keyed by the original graph edge ID."""
++        return MappingProxyType({edge.edge_id: edge for edge in self.edges})
++
++
++@dataclass(frozen=True)
++class RefinedWalkGeometry:
++    """Continuous samples assembled from a discrete walk without changing its events."""
++
++    xy: np.ndarray
++    tangent: np.ndarray
++    curvature: np.ndarray
++    radius_px: np.ndarray
++    confidence: np.ndarray
++    length_px: float
++    edge_ids: tuple[int, ...]
++    edge_directions: tuple[Literal["forward", "reverse"], ...]
++
++    def __post_init__(self) -> None:
++        xy = _subpixel_array(self.xy, name="xy", columns=2)
++        tangent = _subpixel_array(self.tangent, name="tangent", columns=2)
++        curvature = _subpixel_array(self.curvature, name="curvature")
++        radius = _subpixel_array(self.radius_px, name="radius_px")
++        confidence = _subpixel_array(self.confidence, name="confidence")
++        if any(len(values) != len(xy) for values in (tangent, curvature, radius, confidence)):
++            raise ValueError("refined walk geometry arrays must have matching lengths")
++        if np.any(radius < 0.0) or np.any((confidence < 0.0) | (confidence > 1.0)):
++            raise ValueError("walk radius and confidence values are out of range")
++        if not np.isfinite(self.length_px) or self.length_px < 0.0:
++            raise ValueError("length_px must be finite and nonnegative")
++        edge_ids = tuple(int(value) for value in self.edge_ids)
++        directions = tuple(self.edge_directions)
++        if any(value < 0 for value in edge_ids):
++            raise ValueError("walk edge IDs must be nonnegative")
++        if len(edge_ids) != len(directions) or any(
++            direction not in {"forward", "reverse"} for direction in directions
++        ):
++            raise ValueError("walk directions must match its edge sequence")
++        object.__setattr__(self, "xy", xy)
++        object.__setattr__(self, "tangent", tangent)
++        object.__setattr__(self, "curvature", curvature)
++        object.__setattr__(self, "radius_px", radius)
++        object.__setattr__(self, "confidence", confidence)
++        object.__setattr__(self, "length_px", float(self.length_px))
++        object.__setattr__(self, "edge_ids", edge_ids)
++        object.__setattr__(self, "edge_directions", directions)
+diff --git a/skeletonpaths/subpixel.py b/skeletonpaths/subpixel.py
+new file mode 100644
+index 0000000..31501b1
+--- /dev/null
++++ b/skeletonpaths/subpixel.py
+@@ -0,0 +1,928 @@
++"""Topology-preserving reconstruction of continuous subpixel centerlines."""
++
++from __future__ import annotations
++
++from dataclasses import replace
++from math import ceil, floor
++from typing import Literal
++
++import numpy as np
++from numpy.typing import ArrayLike
++
++from .model import (
++    RefinedEdgeDiagnostics,
++    RefinedEdgeGeometry,
++    RefinedSkeletonGeometry,
++    RefinedWalkGeometry,
++    SkeletonAnalysis,
++    SkeletonEdge,
++    SkeletonWalk,
++    SubpixelCenterlineOptions,
++)
++
++
++class SubpixelReconstructionError(RuntimeError):
++    """Raised when continuous geometry cannot be reconstructed reliably."""
++
++
++class SubpixelReconstructionLimitError(RuntimeError):
++    """Raised when a configured refinement work bound would be exceeded."""
++
++    def __init__(self, limit_name: str, configured: int, observed: int) -> None:
++        self.limit_name = limit_name
++        self.configured = configured
++        self.observed = observed
++        super().__init__(
++            f"subpixel refinement exceeded {limit_name}={configured} (observed {observed})"
++        )
++
++
++class _WorkBudget:
++    def __init__(self, options: SubpixelCenterlineOptions) -> None:
++        self.options = options
++        self.samples = 0
++        self.probes = 0
++
++    def add_samples(self, count: int) -> None:
++        observed = self.samples + count
++        if observed > self.options.max_refinement_samples:
++            raise SubpixelReconstructionLimitError(
++                "max_refinement_samples", self.options.max_refinement_samples, observed
++            )
++        self.samples = observed
++
++    def add_probes(self, count: int) -> None:
++        observed = self.probes + count
++        if observed > self.options.max_normal_probes:
++            raise SubpixelReconstructionLimitError(
++                "max_normal_probes", self.options.max_normal_probes, observed
++            )
++        self.probes = observed
++
++
++class _Observations:
++    def __init__(self, points: np.ndarray) -> None:
++        self.raw_points = np.array(points, dtype=float, copy=True)
++        self.centers = self.raw_points.copy()
++        self.radii = np.zeros(len(points), dtype=float)
++        self.confidence = np.zeros(len(points), dtype=float)
++        self.valid = np.zeros(len(points), dtype=bool)
++        self.reasons: dict[str, int] = {}
++        self.probes = 0
++        self.junction_guard_count = 0
++
++    def reject(self, index: int, reason: str) -> None:
++        self.reasons[reason] = self.reasons.get(reason, 0) + 1
++        if reason == "junction_guard":
++            self.junction_guard_count += 1
++        self.valid[index] = False
++        self.confidence[index] = 0.0
++        self.centers[index] = self.raw_points[index]
++
++
++def _binary_signed_distance(mask: np.ndarray) -> np.ndarray:
++    try:
++        from scipy.ndimage import distance_transform_edt
++    except ImportError as error:  # pragma: no cover - depends on optional installation
++        raise ImportError(
++            "binary-distance subpixel fallback requires SciPy; install skeletonpaths[image]"
++        ) from error
++    return distance_transform_edt(mask) - distance_transform_edt(~mask)
++
++
++def _validate_decision_field(field: ArrayLike, mask: np.ndarray) -> np.ndarray:
++    try:
++        values = np.asarray(field, dtype=float)
++    except (TypeError, ValueError) as error:
++        raise ValueError("decision_field must be a finite numeric array") from error
++    if values.shape != mask.shape or values.ndim != 2 or not np.isfinite(values).all():
++        raise ValueError("decision_field must be finite and match the mask shape")
++    if np.any(values[mask] < 0.0) or np.any(values[~mask] > 0.0):
++        raise ValueError(
++            "decision_field must be nonnegative inside and nonpositive outside the mask"
++        )
++    return np.array(values, dtype=float, copy=True)
++
++
++def _bilinear(values: np.ndarray, xy: np.ndarray) -> float | None:
++    x, y = map(float, xy)
++    height, width = values.shape
++    if x < 0.0 or y < 0.0 or x > width - 1 or y > height - 1:
++        return None
++    x0, y0 = floor(x), floor(y)
++    x1, y1 = min(x0 + 1, width - 1), min(y0 + 1, height - 1)
++    tx, ty = x - x0, y - y0
++    top = values[y0, x0] * (1.0 - tx) + values[y0, x1] * tx
++    bottom = values[y1, x0] * (1.0 - tx) + values[y1, x1] * tx
++    return float(top * (1.0 - ty) + bottom * ty)
++
++
++def _cumulative_length(points: np.ndarray) -> np.ndarray:
++    if len(points) < 2:
++        return np.zeros(len(points), dtype=float)
++    return np.concatenate(([0.0], np.cumsum(np.linalg.norm(np.diff(points, axis=0), axis=1))))
++
++
++def _unit(vector: np.ndarray) -> np.ndarray:
++    norm = float(np.linalg.norm(vector))
++    if norm <= 1e-12:
++        return np.array((1.0, 0.0))
++    return vector / norm
++
++
++def _local_tangents(points: np.ndarray, window_px: float) -> np.ndarray:
++    distances = _cumulative_length(points)
++    tangents = np.empty_like(points, dtype=float)
++    total_length = distances[-1]
++    for index in range(len(points)):
++        start_distance = max(0.0, distances[index] - window_px / 2.0)
++        end_distance = min(total_length, distances[index] + window_px / 2.0)
++        if distances[index] < window_px / 2.0:
++            end_distance = min(total_length, window_px)
++        elif total_length - distances[index] < window_px / 2.0:
++            start_distance = max(0.0, total_length - window_px)
++        low = int(np.searchsorted(distances, start_distance, side="left"))
++        high = int(np.searchsorted(distances, end_distance, side="right"))
++        if high - low < 2:
++            low = max(0, min(index - 1, len(points) - 2))
++            high = min(len(points), low + 2)
++        local = points[low:high]
++        centered = local - local.mean(axis=0)
++        covariance = centered.T @ centered
++        _, vectors = np.linalg.eigh(covariance)
++        tangent = _unit(vectors[:, -1])
++        if float(np.dot(tangent, points[high - 1] - points[low])) < 0.0:
++            tangent = -tangent
++        tangents[index] = tangent
++    return tangents
++
++
++def _locate_boundary(
++    field: np.ndarray,
++    center: np.ndarray,
++    normal: np.ndarray,
++    direction: float,
++    center_value: float,
++    max_search: float,
++    options: SubpixelCenterlineOptions,
++    budget: _WorkBudget,
++) -> tuple[float | None, float, int, int]:
++    step = options.normal_sample_step_px
++    steps = max(1, ceil(max_search / step))
++    if steps > options.max_normal_probes - budget.probes:
++        raise SubpixelReconstructionLimitError(
++            "max_normal_probes", options.max_normal_probes, budget.probes + steps
++        )
++    previous_value = center_value
++    previous_distance = 0.0
++    crossing: float | None = None
++    gradient = 0.0
++    crossing_count = 0
++    probes = 0
++    for step_index in range(1, steps + 1):
++        distance = min(step_index * step, max_search)
++        value = _bilinear(field, center + direction * distance * normal)
++        probes += 1
++        if value is None:
++            break
++        if previous_value > 0.0 and value <= 0.0:
++            crossing_count += 1
++            if crossing is None:
++                fraction = previous_value / (previous_value - value)
++                crossing = previous_distance + fraction * (distance - previous_distance)
++                gradient = abs(value - previous_value) / (distance - previous_distance)
++        elif previous_value <= 0.0 and value > 0.0:
++            crossing_count += 1
++        previous_value = value
++        previous_distance = distance
++        if distance >= max_search:
++            break
++    budget.add_probes(probes)
++    return crossing, gradient, crossing_count, probes
++
++
++def _cross_section(
++    point: np.ndarray,
++    tangent: np.ndarray,
++    field: np.ndarray,
++    radius_map: np.ndarray,
++    options: SubpixelCenterlineOptions,
++    budget: _WorkBudget,
++) -> tuple[np.ndarray | None, float, float, str | None, int]:
++    center_value = _bilinear(field, point)
++    if center_value is None or center_value <= 0.0:
++        return None, 0.0, 0.0, "center_not_inside", 0
++    expected_radius = _bilinear(radius_map, point)
++    expected_radius = max(0.5, expected_radius or 0.0)
++    max_search = options.max_normal_search_px
++    if max_search is None:
++        max_search = min(32.0, max(2.0, 3.0 * expected_radius + 1.0))
++    normal = np.array((-tangent[1], tangent[0]))
++    plus, plus_gradient, plus_count, plus_probes = _locate_boundary(
++        field, point, normal, 1.0, center_value, max_search, options, budget
++    )
++    minus, minus_gradient, minus_count, minus_probes = _locate_boundary(
++        field, point, normal, -1.0, center_value, max_search, options, budget
++    )
++    probes = plus_probes + minus_probes
++    if plus_count > 1 or minus_count > 1:
++        return None, expected_radius, 0.0, "multiple_crossings", probes
++    if plus is None or minus is None:
++        reason = "missing_positive_crossing" if plus is None else "missing_negative_crossing"
++        return None, expected_radius, 0.0, reason, probes
++    if min(plus_gradient, minus_gradient) < options.min_boundary_gradient:
++        return None, expected_radius, 0.0, "weak_boundary_gradient", probes
++    radius = 0.5 * (plus + minus)
++    ratio = radius / expected_radius
++    if ratio < 0.2 or ratio > 3.5:
++        return None, expected_radius, 0.0, "radius_disagreement", probes
++    gradient_score = min(
++        1.0,
++        min(plus_gradient, minus_gradient) / max(0.25, 4.0 * options.min_boundary_gradient),
++    )
++    radius_score = float(np.exp(-abs(np.log(max(ratio, 1e-12)))))
++    confidence = gradient_score * radius_score
++    candidate = point + 0.5 * (plus - minus) * normal
++    if confidence < options.min_sample_confidence:
++        return None, expected_radius, confidence, "low_sample_confidence", probes
++    return candidate, radius, confidence, None, probes
++
++
++def _observe_edge(
++    points: np.ndarray,
++    tangents: np.ndarray,
++    edge: SkeletonEdge,
++    analysis: SkeletonAnalysis,
++    field: np.ndarray,
++    options: SubpixelCenterlineOptions,
++    budget: _WorkBudget,
++) -> _Observations:
++    observations = _Observations(points)
++    distances = _cumulative_length(points)
++    edge_length = float(distances[-1]) if len(distances) else 0.0
++    node_by_id = {node.id: node for node in analysis.graph.nodes}
++    start_junction = node_by_id[edge.a].degree > 2
++    end_junction = node_by_id[edge.b].degree > 2
++    for index, point in enumerate(points):
++        if start_junction and distances[index] < options.junction_guard_px:
++            observations.reject(index, "junction_guard")
++            continue
++        if end_junction and edge_length - distances[index] < options.junction_guard_px:
++            observations.reject(index, "junction_guard")
++            continue
++        candidate, radius, confidence, reason, probes = _cross_section(
++            point, tangents[index], field, analysis.radius, options, budget
++        )
++        observations.probes += probes
++        if reason is not None:
++            observations.reject(index, reason)
++            continue
++        assert candidate is not None
++        observations.centers[index] = candidate
++        observations.radii[index] = radius
++        observations.confidence[index] = confidence
++        observations.valid[index] = True
++    valid_indices = np.flatnonzero(observations.valid)
++    for index in valid_indices:
++        neighbors = valid_indices[np.abs(valid_indices - index) <= 2]
++        if len(neighbors) > 1:
++            local = observations.radii[neighbors]
++            ratio = float(np.max(local) / max(np.min(local), 1e-6))
++            if ratio > 2.5:
++                observations.confidence[index] *= 0.35
++                if observations.confidence[index] < options.min_sample_confidence:
++                    observations.reject(index, "radius_discontinuity")
++    return observations
++
++
++def _nearest_valid(observations: _Observations, from_start: bool) -> int | None:
++    indices = np.flatnonzero(observations.valid)
++    if not len(indices):
++        return None
++    return int(indices[0] if from_start else indices[-1])
++
++
++def _reject_high_curvature(
++    observations: _Observations,
++    curvature: np.ndarray,
++    max_curvature_radius: float,
++) -> None:
++    for index in np.flatnonzero(observations.valid):
++        if abs(curvature[index]) * observations.radii[index] > max_curvature_radius:
++            observations.reject(int(index), "high_curvature_radius")
++
++
++def _refined_nodes(
++    analysis: SkeletonAnalysis,
++    observations_by_edge: dict[int, _Observations],
++    tangents_by_edge: dict[int, np.ndarray],
++    endpoint_guard_px: float,
++) -> tuple[dict[int, tuple[float, float]], dict[int, float], dict[int, float]]:
++    graph = analysis.graph
++    node_xy: dict[int, tuple[float, float]] = {}
++    node_confidence: dict[int, float] = {}
++    node_radius: dict[int, float] = {}
++    for node in graph.nodes:
++        raw = np.asarray(node.xy, dtype=float)
++        candidates: list[tuple[np.ndarray, float, float, float]] = []
++        for edge_id, edge in enumerate(graph.edges):
++            if edge.a == node.id and edge.b == node.id:
++                continue
++            if edge.a != node.id and edge.b != node.id:
++                continue
++            from_start = edge.a == node.id
++            observations = observations_by_edge[edge_id]
++            distances = _cumulative_length(edge.xy)
++            index = _nearest_valid(observations, from_start)
++            if index is None:
++                continue
++            if node.degree == 1:
++                valid_indices = np.flatnonzero(observations.valid)
++                endpoint_distances = (
++                    distances[valid_indices]
++                    if from_start
++                    else distances[-1] - distances[valid_indices]
++                )
++                away_from_cap = valid_indices[endpoint_distances >= endpoint_guard_px]
++                if len(away_from_cap):
++                    index = int(away_from_cap[0] if from_start else away_from_cap[-1])
++            candidate = observations.centers[index]
++            confidence = float(observations.confidence[index])
++            radius = float(observations.radii[index])
++            if node.degree == 1:
++                edge_tangent = tangents_by_edge[edge_id][index]
++                normal = np.array((-edge_tangent[1], edge_tangent[0]))
++                signed_distance = (
++                    -distances[index] if from_start else distances[-1] - distances[index]
++                )
++                predicted_node = candidate + signed_distance * edge_tangent
++                shift = predicted_node - raw
++                prediction = raw + float(np.dot(shift, normal)) * normal
++                distance = abs(float(signed_distance))
++            elif node.degree > 2:
++                tangent = tangents_by_edge[edge_id][index]
++                signed_distance = (
++                    -distances[index] if from_start else distances[-1] - distances[index]
++                )
++                prediction = candidate + signed_distance * tangent
++                distance = abs(float(signed_distance))
++            else:
++                continue
++            candidates.append((prediction, confidence / (1.0 + distance), confidence, radius))
++        if candidates:
++            weights = np.asarray([candidate[1] for candidate in candidates], dtype=float)
++            predicted = np.asarray([candidate[0] for candidate in candidates], dtype=float)
++            position = np.average(predicted, axis=0, weights=weights)
++            max_shift = max(0.75, min(3.0, max(node.radius_px, 0.75)))
++            delta = position - raw
++            norm = float(np.linalg.norm(delta))
++            if norm > max_shift:
++                position = raw + delta * (max_shift / norm)
++            confidence = float(
++                np.average([candidate[2] for candidate in candidates], weights=weights)
++            )
++            radii = [candidate[3] for candidate in candidates if candidate[3] > 0.0]
++            radius = float(np.average(radii)) if radii else node.radius_px
++        else:
++            position = raw
++            confidence = 0.0 if node.degree == 0 else 0.25
++            radius = node.radius_px
++        node_xy[node.id] = (float(position[0]), float(position[1]))
++        node_confidence[node.id] = confidence
++        node_radius[node.id] = radius
++    return node_xy, node_confidence, node_radius
++
++
++def _default_spline_options():
++    try:
++        from planarcurve.fitting import PolylineSplineFitOptions
++    except ImportError as error:  # pragma: no cover - depends on optional installation
++        raise ImportError(
++            "subpixel spline fitting requires PlanarCurve's fitting extra and SciPy"
++        ) from error
++    return PolylineSplineFitOptions(
++        min_control_points=4,
++        max_control_points=12,
++        candidate_control_counts=(4, 6, 8, 10, 12),
++        target_rms_error_fraction=0.004,
++        target_p95_error_fraction=0.008,
++    )
++
++
++def _locked_spline_options(options: SubpixelCenterlineOptions):
++    try:
++        from planarcurve.fitting import PolylineSplineFitOptions, SplineEndpointPolicy
++    except ImportError as error:  # pragma: no cover - depends on optional installation
++        raise ImportError(
++            "subpixel spline fitting requires PlanarCurve's fitting extra and SciPy"
++        ) from error
++    spline_options = options.spline_options or _default_spline_options()
++    if not isinstance(spline_options, PolylineSplineFitOptions):
++        raise TypeError("spline_options must be a PolylineSplineFitOptions value")
++    if spline_options.max_control_points > 16:
++        raise ValueError("spline_options.max_control_points must not exceed 16")
++    if (
++        spline_options.candidate_control_counts is not None
++        and len(spline_options.candidate_control_counts) > 9
++    ):
++        raise ValueError("spline_options may test at most nine control counts")
++    return replace(
++        spline_options,
++        endpoint_policy=SplineEndpointPolicy(start="locked", end="locked"),
++    )
++
++
++def _fit_one(
++    points: np.ndarray,
++    confidence: np.ndarray,
++    start: tuple[float, float],
++    end: tuple[float, float],
++    spline_options,
++):
++    from planarcurve.fitting import fit_polyline_spline
++
++    fit_points = np.array(points, dtype=float, copy=True)
++    fit_points[0] = start
++    fit_points[-1] = end
++    weights = np.maximum(np.asarray(confidence, dtype=float), 0.01)
++    try:
++        return fit_polyline_spline(fit_points, weights=weights, options=spline_options)
++    except (ValueError, np.linalg.LinAlgError) as error:
++        raise SubpixelReconstructionError(
++            f"PlanarCurve could not fit an edge segment: {error}"
++        ) from error
++
++
++def _fit_and_sample_segment(
++    points: np.ndarray,
++    radii: np.ndarray,
++    confidence: np.ndarray,
++    start: tuple[float, float],
++    end: tuple[float, float],
++    spline_options,
++    options: SubpixelCenterlineOptions,
++    budget: _WorkBudget,
++):
++    from planarcurve.polyline import normalized_arclength
++
++    fit_points = np.array(points, dtype=float, copy=True)
++    fit_points[0], fit_points[-1] = start, end
++    fit = _fit_one(fit_points, confidence, start, end, spline_options)
++    curve = fit.curve
++    dense_count = max(64, min(2048, len(curve.control_points) * 32))
++    dense = curve.sample_by_arclength(dense_count)
++    length = float(np.linalg.norm(np.diff(dense.xy, axis=0), axis=1).sum())
++    count = max(2, ceil(length / options.output_spacing_px) + 1)
++    budget.add_samples(count)
++    sampled = curve.sample_by_arclength(count)
++    observation_parameters = normalized_arclength(fit_points)
++    sample_radii = np.interp(sampled.u, observation_parameters, radii)
++    sample_confidence = np.interp(sampled.u, observation_parameters, confidence)
++    residual_scale = fit.diagnostics.normalized_scale
++    residual_median = fit.diagnostics.residual_median * residual_scale
++    residual_p95 = fit.diagnostics.residual_p95 * residual_scale
++    return (
++        curve,
++        sampled.xy,
++        sampled.tangent,
++        sampled.curvature,
++        sample_radii,
++        sample_confidence,
++        length,
++        residual_median,
++        residual_p95,
++        fit.diagnostics.control_count,
++    )
++
++
++def _fit_edge(
++    edge: SkeletonEdge,
++    points: np.ndarray,
++    observations: _Observations,
++    node_xy: dict[int, tuple[float, float]],
++    spline_options,
++    options: SubpixelCenterlineOptions,
++    budget: _WorkBudget,
++):
++    if edge.a != edge.b:
++        result = _fit_and_sample_segment(
++            points,
++            observations.radii,
++            observations.confidence,
++            node_xy[edge.a],
++            node_xy[edge.b],
++            spline_options,
++            options,
++            budget,
++        )
++        curve, xy, tangent, curvature, radius, confidence, length, median, p95, controls = result
++        return (curve,), xy, tangent, curvature, radius, confidence, length, median, p95, controls
++
++    distances = _cumulative_length(points)
++    if len(points) < 3 or distances[-1] <= 0.0:
++        raise SubpixelReconstructionError(
++            "a closed graph edge needs at least three distinct samples"
++        )
++    split_index = int(np.argmin(np.abs(distances - 0.5 * distances[-1])))
++    split_index = min(max(split_index, 1), len(points) - 2)
++    split = tuple(map(float, points[split_index]))
++    first = _fit_and_sample_segment(
++        points[: split_index + 1],
++        observations.radii[: split_index + 1],
++        observations.confidence[: split_index + 1],
++        node_xy[edge.a],
++        split,
++        spline_options,
++        options,
++        budget,
++    )
++    second = _fit_and_sample_segment(
++        points[split_index:],
++        observations.radii[split_index:],
++        observations.confidence[split_index:],
++        split,
++        node_xy[edge.a],
++        spline_options,
++        options,
++        budget,
++    )
++    curves = (first[0], second[0])
++    arrays = [np.concatenate((first[index], second[index][1:]), axis=0) for index in range(1, 6)]
++    length = first[6] + second[6]
++    median = float(np.average((first[7], second[7]), weights=(first[6], second[6])))
++    p95 = max(first[8], second[8])
++    controls = first[9] + second[9]
++    return curves, *arrays, length, median, p95, controls
++
++
++def _merge_reasons(target: dict[str, int], source: dict[str, int]) -> None:
++    for reason, count in source.items():
++        target[reason] = target.get(reason, 0) + count
++
++
++def refine_graph_geometry(
++    analysis: SkeletonAnalysis,
++    *,
++    decision_field: ArrayLike | None = None,
++    options: SubpixelCenterlineOptions | None = None,
++) -> RefinedSkeletonGeometry:
++    """Refine graph edges to subpixel geometry without modifying discrete topology.
++
++    ``decision_field`` is a finite signed field sampled at pixel centers, with
++    nonnegative values inside the mask and nonpositive values outside. When it is
++    omitted, a signed Euclidean distance transform is constructed from the mask.
++    """
++    if not isinstance(analysis, SkeletonAnalysis):
++        raise TypeError("analysis must be a SkeletonAnalysis")
++    if options is None:
++        options = SubpixelCenterlineOptions()
++    if not isinstance(options, SubpixelCenterlineOptions):
++        raise TypeError("options must be SubpixelCenterlineOptions")
++    source: Literal["decision-field", "binary-distance-fallback"]
++    if decision_field is None:
++        field = _binary_signed_distance(analysis.mask)
++        source = "binary-distance-fallback"
++    else:
++        field = _validate_decision_field(decision_field, analysis.mask)
++        source = "decision-field"
++
++    graph = analysis.graph
++    budget = _WorkBudget(options)
++    budget.add_samples(sum(len(edge.xy) for edge in graph.edges))
++    raw_observations: dict[int, _Observations] = {}
++    raw_tangents: dict[int, np.ndarray] = {}
++    all_reasons: dict[int, dict[str, int]] = {}
++    probe_counts = {edge_id: 0 for edge_id in range(len(graph.edges))}
++    for edge_id, edge in enumerate(graph.edges):
++        tangents = _local_tangents(edge.xy, options.tangent_window_px)
++        observations = _observe_edge(edge.xy, tangents, edge, analysis, field, options, budget)
++        raw_observations[edge_id] = observations
++        raw_tangents[edge_id] = tangents
++        all_reasons[edge_id] = dict(observations.reasons)
++        probe_counts[edge_id] += observations.probes
++
++    node_xy, node_confidence, node_radius = _refined_nodes(
++        analysis,
++        raw_observations,
++        raw_tangents,
++        options.tangent_window_px / 2.0,
++    )
++    spline_options = _locked_spline_options(options) if graph.edges else None
++    current_points = {edge_id: edge.xy for edge_id, edge in enumerate(graph.edges)}
++    current_tangents = raw_tangents
++    current_curvatures: dict[int, np.ndarray] = {}
++    final_data = {}
++    initial_residuals: dict[int, float] = {}
++    for pass_index in range(options.refinement_passes):
++        next_points: dict[int, np.ndarray] = {}
++        next_curvatures: dict[int, np.ndarray] = {}
++        next_tangents: dict[int, np.ndarray] = {}
++        for edge_id, edge in enumerate(graph.edges):
++            if pass_index == 0:
++                observations = raw_observations[edge_id]
++            else:
++                observations = _observe_edge(
++                    current_points[edge_id],
++                    current_tangents[edge_id],
++                    edge,
++                    analysis,
++                    field,
++                    options,
++                    budget,
++                )
++                _reject_high_curvature(
++                    observations,
++                    current_curvatures[edge_id],
++                    options.max_curvature_radius,
++                )
++                _merge_reasons(all_reasons[edge_id], observations.reasons)
++                probe_counts[edge_id] += observations.probes
++            (
++                curves,
++                xy,
++                tangent,
++                curvature,
++                radius,
++                confidence,
++                length,
++                median,
++                p95,
++                controls,
++            ) = _fit_edge(
++                edge,
++                observations.centers,
++                observations,
++                node_xy,
++                spline_options,
++                options,
++                budget,
++            )
++            if pass_index == 0:
++                initial_residuals[edge_id] = p95
++            next_points[edge_id] = xy
++            next_tangents[edge_id] = tangent
++            next_curvatures[edge_id] = curvature
++            final_data[edge_id] = (
++                curves,
++                xy,
++                tangent,
++                curvature,
++                radius,
++                confidence,
++                length,
++                median,
++                p95,
++                controls,
++                observations,
++            )
++        current_points = next_points
++        current_tangents = next_tangents
++        current_curvatures = next_curvatures
++
++    refined_edges = []
++    for edge_id, edge in enumerate(graph.edges):
++        (
++            curves,
++            xy,
++            tangent,
++            curvature,
++            radius,
++            confidence,
++            length,
++            median_residual,
++            p95_residual,
++            controls,
++            final_observations,
++        ) = final_data[edge_id]
++        xy = np.array(xy, dtype=float, copy=True)
++        xy[0] = node_xy[edge.a]
++        xy[-1] = node_xy[edge.b]
++        confidence = np.array(confidence, dtype=float, copy=True)
++        radius = np.array(radius, dtype=float, copy=True)
++        confidence[0] = node_confidence[edge.a]
++        confidence[-1] = node_confidence[edge.b]
++        radius[0] = node_radius[edge.a]
++        radius[-1] = node_radius[edge.b]
++        if edge.a == edge.b and len(confidence) > 2:
++            raw_distances = _cumulative_length(edge.xy)
++            raw_split = int(np.argmin(np.abs(raw_distances - 0.5 * edge.length_px)))
++            split_point = edge.xy[raw_split]
++            split_index = int(np.argmin(np.linalg.norm(xy - split_point, axis=1)))
++            split_index = min(max(split_index, 1), len(confidence) - 2)
++            if float(np.dot(tangent[split_index - 1], tangent[split_index + 1])) < 0.85:
++                confidence[split_index] *= 0.25
++                all_reasons[edge_id]["loop_split_tangent_discontinuity"] = 1
++        curvature_radius = np.abs(curvature) * radius
++        initial_count = int(raw_observations[edge_id].valid.sum())
++        diagnostics = RefinedEdgeDiagnostics(
++            raw_point_count=len(edge.xy),
++            valid_cross_section_count=initial_count,
++            invalid_reason_counts=all_reasons[edge_id],
++            median_shift_px=float(
++                np.median(np.linalg.norm(raw_observations[edge_id].centers - edge.xy, axis=1))
++            ),
++            p95_shift_px=float(
++                np.percentile(
++                    np.linalg.norm(raw_observations[edge_id].centers - edge.xy, axis=1),
++                    95,
++                )
++            ),
++            median_spline_residual_px=median_residual,
++            p95_spline_residual_px=p95_residual,
++            selected_control_count=controls,
++            first_pass_improvement_px=initial_residuals[edge_id] - p95_residual,
++            junction_guard_sample_count=sum(
++                count
++                for reason, count in all_reasons[edge_id].items()
++                if reason == "junction_guard"
++            ),
++            max_abs_curvature_radius=float(np.max(curvature_radius, initial=0.0)),
++            normal_probe_count=probe_counts[edge_id],
++            spline_fit_count=len(curves) * options.refinement_passes,
++        )
++        refined_edges.append(
++            RefinedEdgeGeometry(
++                edge_id=edge_id,
++                xy=xy,
++                tangent=tangent,
++                curvature=curvature,
++                radius_px=radius,
++                confidence=confidence,
++                length_px=length,
++                source=source,
++                diagnostics=diagnostics,
++                curve_segments=curves,
++            )
++        )
++
++    return RefinedSkeletonGeometry(
++        analysis=analysis,
++        edges=tuple(refined_edges),
++        node_xy=node_xy,
++        node_confidence=node_confidence,
++        node_radius_px=node_radius,
++        diagnostics={
++            "source": source,
++            "normal_probe_count": budget.probes,
++            "refinement_sample_count": budget.samples,
++            "spline_fit_count": sum(edge.diagnostics.spline_fit_count for edge in refined_edges),
++        },
++    )
++
++
++_MAX_WALK_SAMPLES = 1_000_000
++
++
++def _resample_edge(
++    edge: RefinedEdgeGeometry, sample_count: int
++) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
++    distances = _cumulative_length(edge.xy)
++    if distances[-1] <= 0.0:
++        raise SubpixelReconstructionError("a refined edge must have positive sampled length")
++    target = np.linspace(0.0, distances[-1], sample_count)
++    xy = np.column_stack([np.interp(target, distances, edge.xy[:, axis]) for axis in range(2)])
++    tangent = np.column_stack(
++        [np.interp(target, distances, edge.tangent[:, axis]) for axis in range(2)]
++    )
++    tangent_norm = np.linalg.norm(tangent, axis=1)
++    valid = tangent_norm > 1e-12
++    tangent[valid] /= tangent_norm[valid, None]
++    tangent[~valid] = (1.0, 0.0)
++    curvature = np.interp(target, distances, edge.curvature)
++    radius = np.interp(target, distances, edge.radius_px)
++    confidence = np.interp(target, distances, edge.confidence)
++    return xy, tangent, curvature, radius, confidence
++
++
++def refined_walk(
++    graph_geometry: RefinedSkeletonGeometry,
++    walk: SkeletonWalk,
++    *,
++    sample_count: int | None = None,
++) -> RefinedWalkGeometry:
++    """Assemble continuous geometry from the exact edge sequence of ``walk``.
++
++    Each edge is reused from ``graph_geometry``. Reverse traversals reverse the
++    samples, negate tangent and signed curvature, and repeated traversals never
++    trigger another fit. When ``sample_count`` is supplied, each edge traversal
++    is independently resampled to that many points before shared nodes are joined.
++    """
++    if not isinstance(graph_geometry, RefinedSkeletonGeometry):
++        raise TypeError("graph_geometry must be a RefinedSkeletonGeometry")
++    if not isinstance(walk, SkeletonWalk):
++        raise TypeError("walk must be a SkeletonWalk")
++    walk._validate_graph(graph_geometry.graph)
++
++    if sample_count is not None:
++        if (
++            isinstance(sample_count, bool)
++            or not isinstance(sample_count, (int, np.integer))
++            or sample_count < 2
++        ):
++            raise ValueError("sample_count must be an integer of at least two")
++        if (
++            any(
++                graph_geometry.graph.edges[edge_id].a == graph_geometry.graph.edges[edge_id].b
++                for edge_id in walk.edge_ids
++            )
++            and sample_count < 3
++        ):
++            raise ValueError("closed-edge traversals require sample_count of at least three")
++        sample_count = int(sample_count)
++        requested = sample_count * len(walk.edge_ids)
++        if requested > _MAX_WALK_SAMPLES:
++            raise SubpixelReconstructionLimitError("max_walk_samples", _MAX_WALK_SAMPLES, requested)
++
++    if not walk.edge_ids:
++        if walk.start_node is None:
++            empty_xy = np.empty((0, 2), dtype=float)
++            return RefinedWalkGeometry(
++                xy=empty_xy,
++                tangent=empty_xy,
++                curvature=np.empty(0),
++                radius_px=np.empty(0),
++                confidence=np.empty(0),
++                length_px=0.0,
++                edge_ids=(),
++                edge_directions=(),
++            )
++        point = np.asarray([graph_geometry.node_xy[walk.start_node]], dtype=float)
++        return RefinedWalkGeometry(
++            xy=point,
++            tangent=np.zeros((1, 2), dtype=float),
++            curvature=np.zeros(1),
++            radius_px=np.asarray([graph_geometry.node_radius_px[walk.start_node]]),
++            confidence=np.asarray([graph_geometry.node_confidence[walk.start_node]]),
++            length_px=0.0,
++            edge_ids=(),
++            edge_directions=(),
++        )
++
++    graph = graph_geometry.graph
++    edge_lookup = graph_geometry.edge_by_id
++    pieces: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
++    current_node = walk.start_node
++    total_length = 0.0
++    total_samples = 0
++    for edge_id, direction in zip(walk.edge_ids, walk.edge_directions, strict=True):
++        edge = graph.edges[edge_id]
++        refined = edge_lookup[edge_id]
++        if direction == "forward":
++            entry, exit_node = edge.a, edge.b
++            arrays = (
++                refined.xy,
++                refined.tangent,
++                refined.curvature,
++                refined.radius_px,
++                refined.confidence,
++            )
++        else:
++            entry, exit_node = edge.b, edge.a
++            arrays = (
++                refined.xy[::-1],
++                -refined.tangent[::-1],
++                -refined.curvature[::-1],
++                refined.radius_px[::-1],
++                refined.confidence[::-1],
++            )
++        if entry != current_node:
++            raise ValueError("walk edge direction does not continue from the current node")
++        if sample_count is not None:
++            arrays = _resample_edge(refined, sample_count)
++            if direction == "reverse":
++                arrays = (
++                    arrays[0][::-1],
++                    -arrays[1][::-1],
++                    -arrays[2][::-1],
++                    arrays[3][::-1],
++                    arrays[4][::-1],
++                )
++        arrays = tuple(np.array(values, dtype=float, copy=True) for values in arrays)
++        arrays[0][0] = graph_geometry.node_xy[entry]
++        arrays[0][-1] = graph_geometry.node_xy[exit_node]
++        if pieces:
++            previous_end = pieces[-1][0][-1]
++            if not np.allclose(previous_end, arrays[0][0], rtol=0.0, atol=1e-8):
++                raise SubpixelReconstructionError(
++                    f"refined edges do not meet at graph node {entry}"
++                )
++        total_samples += len(arrays[0])
++        if total_samples > _MAX_WALK_SAMPLES:
++            raise SubpixelReconstructionLimitError(
++                "max_walk_samples", _MAX_WALK_SAMPLES, total_samples
++            )
++        pieces.append(arrays)
++        total_length += refined.length_px
++        current_node = exit_node
++
++    joined = tuple(np.concatenate([piece[axis] for piece in pieces], axis=0) for axis in range(5))
++    return RefinedWalkGeometry(
++        xy=joined[0],
++        tangent=joined[1],
++        curvature=joined[2],
++        radius_px=joined[3],
++        confidence=joined[4],
++        length_px=total_length,
++        edge_ids=walk.edge_ids,
++        edge_directions=walk.edge_directions,
++    )
+diff --git a/tests/test_benchmark_subpixel.py b/tests/test_benchmark_subpixel.py
+new file mode 100644
+index 0000000..fc6028a
+--- /dev/null
++++ b/tests/test_benchmark_subpixel.py
+@@ -0,0 +1,32 @@
++import json
++import subprocess
++import sys
++from pathlib import Path
++
++
++def test_subpixel_benchmark_smoke_reports_bounded_metrics():
++    root = Path(__file__).resolve().parents[1]
++    completed = subprocess.run(
++        [
++            sys.executable,
++            str(root / "benchmarks" / "benchmark_subpixel.py"),
++            "--side",
++            "64",
++            "--repeats",
++            "1",
++            "--json",
++        ],
++        check=True,
++        capture_output=True,
++        text=True,
++        timeout=60,
++        cwd=root,
++    )
++    report = json.loads(completed.stdout)
++
++    assert report["configuration"]["side_px"] == 64
++    assert report["runtime_seconds_per_glyph_crop"]["median"] > 0.0
++    assert report["work"]["edge_count"] > 0
++    assert 0 < report["work"]["peak_refinement_sample_count"] <= 100_000
++    assert 0 < report["work"]["peak_normal_probe_count"] <= 1_000_000
++    assert report["memory"]["retained_refined_geometry_array_bytes"] > 0
+diff --git a/tests/test_subpixel.py b/tests/test_subpixel.py
+new file mode 100644
+index 0000000..88d44ac
+--- /dev/null
++++ b/tests/test_subpixel.py
+@@ -0,0 +1,505 @@
++import numpy as np
++import pytest
++
++from skeletonpaths import (
++    RefinedEdgeDiagnostics,
++    RefinedEdgeGeometry,
++    RefinedSkeletonGeometry,
++    RefinedWalkGeometry,
++    SubpixelCenterlineOptions,
++    SubpixelReconstructionLimitError,
++    analyze_mask,
++    covering_walk,
++    refine_graph_geometry,
++    refined_walk,
++)
++
++
++def _line_analysis():
++    mask = np.zeros((15, 20), dtype=bool)
++    mask[6:9, 2:18] = True
++    return analyze_mask(mask)
++
++
++def test_subpixel_result_models_are_public_and_immutable():
++    analysis = _line_analysis()
++    edge = analysis.graph.edges[0]
++    points = edge.xy.copy()
++    tangent = np.tile((1.0, 0.0), (len(points), 1))
++    diagnostics = RefinedEdgeDiagnostics(
++        raw_point_count=len(points),
++        valid_cross_section_count=len(points),
++        invalid_reason_counts={},
++        median_shift_px=0.0,
++        p95_shift_px=0.0,
++        median_spline_residual_px=0.0,
++        p95_spline_residual_px=0.0,
++        selected_control_count=4,
++        first_pass_improvement_px=0.0,
++        junction_guard_sample_count=0,
++        max_abs_curvature_radius=0.0,
++        normal_probe_count=0,
++        spline_fit_count=1,
++    )
++    refined_edge = RefinedEdgeGeometry(
++        edge_id=0,
++        xy=points,
++        tangent=tangent,
++        curvature=np.zeros(len(points)),
++        radius_px=np.ones(len(points)),
++        confidence=np.ones(len(points)),
++        length_px=edge.length_px,
++        source="binary-distance-fallback",
++        diagnostics=diagnostics,
++    )
++    node_xy = {node.id: node.xy for node in analysis.graph.nodes}
++    node_confidence = {node.id: node.confidence for node in analysis.graph.nodes}
++    node_radius = {node.id: node.radius_px for node in analysis.graph.nodes}
++    refined_graph = RefinedSkeletonGeometry(
++        analysis=analysis,
++        edges=(refined_edge,),
++        node_xy=node_xy,
++        node_confidence=node_confidence,
++        node_radius_px=node_radius,
++        diagnostics={"edge_count": 1},
++    )
++    walk_geometry = RefinedWalkGeometry(
++        xy=points,
++        tangent=tangent,
++        curvature=np.zeros(len(points)),
++        radius_px=np.ones(len(points)),
++        confidence=np.ones(len(points)),
++        length_px=edge.length_px,
++        edge_ids=(0,),
++        edge_directions=("forward",),
++    )
++
++    assert refined_graph.graph is analysis.graph
++    assert refined_graph.edge_by_id[0] is refined_edge
++    assert walk_geometry.edge_ids == (0,)
++    assert not refined_edge.xy.flags.writeable
++    assert not walk_geometry.tangent.flags.writeable
++    with pytest.raises(TypeError):
++        refined_graph.node_xy[0] = (0.0, 0.0)
++
++
++def test_subpixel_options_validate_bounded_parameters():
++    options = SubpixelCenterlineOptions()
++    assert options.refinement_passes == 2
++    assert options.normal_sample_step_px == 0.125
++    with pytest.raises(ValueError, match="refinement_passes"):
++        SubpixelCenterlineOptions(refinement_passes=4)
++    with pytest.raises(ValueError, match="min_sample_confidence"):
++        SubpixelCenterlineOptions(min_sample_confidence=1.1)
++
++
++def _offset_rectangle():
++    analysis = _line_analysis()
++    y, x = np.mgrid[: analysis.mask.shape[0], : analysis.mask.shape[1]]
++    field = np.minimum.reduce((y - 5.8, 8.4 - y, x - 1.5, 17.5 - x))
++    return analysis, field
++
++
++def test_refine_graph_geometry_uses_signed_field_and_preserves_graph():
++    analysis, field = _offset_rectangle()
++    original_edge_xy = tuple(edge.xy.copy() for edge in analysis.graph.edges)
++    geometry = refine_graph_geometry(analysis, decision_field=field)
++
++    assert geometry.graph is analysis.graph
++    assert len(geometry.edges) == len(analysis.graph.edges)
++    assert geometry.diagnostics["source"] == "decision-field"
++    assert geometry.edges[0].source == "decision-field"
++    assert geometry.edges[0].diagnostics.valid_cross_section_count > 0
++    assert abs(float(np.median(geometry.edges[0].xy[:, 1])) - 7.1) <= 0.12
++    for edge, refined in zip(analysis.graph.edges, geometry.edges, strict=True):
++        np.testing.assert_array_equal(edge.xy, original_edge_xy[refined.edge_id])
++        np.testing.assert_allclose(refined.xy[0], geometry.node_xy[edge.a])
++        np.testing.assert_allclose(refined.xy[-1], geometry.node_xy[edge.b])
++        assert np.all(np.isfinite(refined.tangent))
++        assert np.all(np.isfinite(refined.curvature))
++
++
++def test_refine_graph_geometry_fallback_and_input_validation():
++    analysis = _line_analysis()
++    fallback = refine_graph_geometry(analysis)
++    assert fallback.diagnostics["source"] == "binary-distance-fallback"
++    assert fallback.edges[0].source == "binary-distance-fallback"
++    assert np.any(np.abs(fallback.edges[0].xy - np.rint(fallback.edges[0].xy)) > 1e-8)
++
++    with pytest.raises(ValueError, match="decision_field"):
++        refine_graph_geometry(analysis, decision_field=np.ones((2, 2)))
++    wrong_sign = np.ones(analysis.mask.shape)
++    with pytest.raises(ValueError, match="nonnegative inside"):
++        refine_graph_geometry(analysis, decision_field=wrong_sign)
++    with pytest.raises(ValueError, match="finite and match"):
++        refine_graph_geometry(analysis, decision_field=np.full(analysis.mask.shape, np.nan))
++
++
++def test_refine_graph_geometry_handles_empty_and_low_gradient_inputs():
++    empty = analyze_mask(np.zeros((8, 9), dtype=bool))
++    result = refine_graph_geometry(empty)
++    assert result.edges == ()
++    assert result.node_xy == {}
++
++    analysis = _line_analysis()
++    low_gradient = refine_graph_geometry(analysis, decision_field=np.zeros(analysis.mask.shape))
++    assert low_gradient.edges[0].diagnostics.valid_cross_section_count == 0
++    assert low_gradient.edges[0].diagnostics.invalid_reason_counts["center_not_inside"] > 0
++
++
++@pytest.mark.parametrize("thickness", [1, 2])
++def test_one_and_two_pixel_strokes_refine_without_topology_changes(thickness):
++    mask = np.zeros((15, 24), dtype=bool)
++    mask[7 : 7 + thickness, 2:22] = True
++    analysis = analyze_mask(mask)
++    geometry = refine_graph_geometry(analysis)
++
++    assert geometry.graph is analysis.graph
++    assert len(geometry.edges) == 1
++    expected_y = 7.0 + (thickness - 1) / 2.0
++    assert abs(float(np.median(geometry.edges[0].xy[:, 1])) - expected_y) <= 0.2
++    assert geometry.edges[0].diagnostics.valid_cross_section_count > 0
++
++
++def test_touching_parallel_strokes_keep_the_analyzed_topology():
++    mask = np.zeros((32, 24), dtype=bool)
++    mask[4:28, 5:8] = True
++    mask[4:28, 8:11] = True
++    analysis = analyze_mask(mask)
++    geometry = refine_graph_geometry(analysis)
++
++    assert geometry.graph is analysis.graph
++    assert geometry.graph.component_count == analysis.graph.component_count == 1
++    assert tuple(edge.edge_id for edge in geometry.edges) == tuple(range(len(analysis.graph.edges)))
++    assert all(np.isfinite(edge.xy).all() for edge in geometry.edges)
++
++
++def test_isolated_pixel_and_disconnected_masks_keep_component_semantics():
++    isolated = np.zeros((9, 12), dtype=bool)
++    isolated[4, 6] = True
++    isolated_analysis = analyze_mask(isolated)
++    isolated_geometry = refine_graph_geometry(isolated_analysis)
++    assert isolated_geometry.graph is isolated_analysis.graph
++    assert isolated_geometry.graph.component_count == 1
++    assert isolated_geometry.edges == ()
++
++    disconnected = np.zeros((28, 48), dtype=bool)
++    disconnected[4:7, 3:20] = True
++    disconnected[18:21, 28:45] = True
++    analysis = analyze_mask(disconnected)
++    geometry = refine_graph_geometry(analysis)
++    assert geometry.graph is analysis.graph
++    assert geometry.graph.component_count == analysis.graph.component_count == 2
++    assert len(geometry.edges) == len(analysis.graph.edges)
++
++
++def test_refine_graph_geometry_obeys_probe_budget():
++    analysis, field = _offset_rectangle()
++    options = SubpixelCenterlineOptions(max_normal_probes=1)
++    with pytest.raises(SubpixelReconstructionLimitError, match="max_normal_probes"):
++        refine_graph_geometry(analysis, decision_field=field, options=options)
++
++    sample_options = SubpixelCenterlineOptions(max_refinement_samples=1)
++    with pytest.raises(SubpixelReconstructionLimitError, match="max_refinement_samples"):
++        refine_graph_geometry(analysis, decision_field=field, options=sample_options)
++
++
++def test_refine_graph_geometry_shares_junction_positions():
++    mask = np.zeros((31, 31), dtype=bool)
++    mask[3:16, 14:17] = True
++    mask[14:17, 4:27] = True
++    analysis = analyze_mask(mask)
++    assert analysis.graph.junction_count >= 1
++    geometry = refine_graph_geometry(analysis)
++
++    assert geometry.graph is analysis.graph
++    assert geometry.graph.cycle_count == analysis.graph.cycle_count
++    junction_nodes = {node.id for node in analysis.graph.nodes if node.degree > 2}
++    for edge in geometry.edges:
++        original = analysis.graph.edges[edge.edge_id]
++        if original.a in junction_nodes:
++            np.testing.assert_allclose(edge.xy[0], geometry.node_xy[original.a])
++            assert edge.diagnostics.junction_guard_sample_count > 0
++        if original.b in junction_nodes:
++            np.testing.assert_allclose(edge.xy[-1], geometry.node_xy[original.b])
++            assert edge.diagnostics.junction_guard_sample_count > 0
++
++
++def test_refine_graph_geometry_closes_pure_loop_without_new_topology():
++    mask = np.zeros((25, 27), dtype=bool)
++    mask[3:6, 4:23] = True
++    mask[19:22, 4:23] = True
++    mask[3:22, 4:7] = True
++    mask[3:22, 20:23] = True
++    analysis = analyze_mask(mask)
++    assert analysis.graph.cycle_count == 1
++    assert len(analysis.graph.edges) == 1
++    assert analysis.graph.edges[0].a == analysis.graph.edges[0].b
++    geometry = refine_graph_geometry(analysis)
++
++    assert len(geometry.edges) == 1
++    assert geometry.graph.cycle_count == 1
++    assert geometry.edges[0].edge_id == 0
++    np.testing.assert_allclose(geometry.edges[0].xy[0], geometry.edges[0].xy[-1])
++    assert len(geometry.edges[0].curve_segments) == 2
++
++
++def test_refined_walk_reverses_edge_geometry_and_resamples_per_edge():
++    analysis, field = _offset_rectangle()
++    geometry = refine_graph_geometry(analysis, decision_field=field)
++    walk = covering_walk(analysis.graph)
++    assert len(walk.edge_ids) == 1
++
++    forward = refined_walk(geometry, walk)
++    reverse = refined_walk(geometry, walk.reversed())
++    assert forward.edge_ids == walk.edge_ids
++    assert forward.edge_directions == walk.edge_directions
++    np.testing.assert_array_equal(reverse.xy, forward.xy[::-1])
++    np.testing.assert_array_equal(reverse.tangent, -forward.tangent[::-1])
++    np.testing.assert_array_equal(reverse.curvature, -forward.curvature[::-1])
++
++    sampled = refined_walk(geometry, walk, sample_count=17)
++    assert len(sampled.xy) == 17
++    np.testing.assert_allclose(sampled.xy[0], geometry.node_xy[walk.start_node])
++    np.testing.assert_allclose(sampled.xy[-1], geometry.node_xy[walk.end_node])
++    with pytest.raises(ValueError, match="sample_count"):
++        refined_walk(geometry, walk, sample_count=1)
++
++
++def test_refined_walk_reuses_retraced_edges_and_handles_empty_walks():
++    mask = np.zeros((31, 31), dtype=bool)
++    mask[3:16, 14:17] = True
++    mask[14:17, 4:27] = True
++    analysis = analyze_mask(mask)
++    geometry = refine_graph_geometry(analysis)
++    walk = covering_walk(analysis.graph)
++    assert walk.repeated_edge_count > 0
++    refined = refined_walk(geometry, walk)
++    assert refined.edge_ids == walk.edge_ids
++    assert refined.edge_directions == walk.edge_directions
++
++    chunks = {}
++    cursor = 0
++    for edge_id, direction in zip(walk.edge_ids, walk.edge_directions, strict=True):
++        edge = geometry.edges[edge_id]
++        count = len(edge.xy)
++        start = cursor
++        stop = start + count
++        points = refined.xy[start:stop]
++        tangents = refined.tangent[start:stop]
++        curvature = refined.curvature[start:stop]
++        expected_xy = edge.xy if direction == "forward" else edge.xy[::-1]
++        expected_tangent = edge.tangent if direction == "forward" else -edge.tangent[::-1]
++        expected_curvature = edge.curvature if direction == "forward" else -edge.curvature[::-1]
++        np.testing.assert_array_equal(points, expected_xy)
++        np.testing.assert_array_equal(tangents, expected_tangent)
++        np.testing.assert_array_equal(curvature, expected_curvature)
++        chunks.setdefault(edge_id, []).append((direction, points, tangents, curvature))
++        cursor = stop
++    for occurrences in chunks.values():
++        if len(occurrences) < 2:
++            continue
++        first, second = occurrences[:2]
++        if first[0] != second[0]:
++            np.testing.assert_array_equal(second[1], first[1][::-1])
++            np.testing.assert_array_equal(second[2], -first[2][::-1])
++            np.testing.assert_array_equal(second[3], -first[3][::-1])
++        else:
++            np.testing.assert_array_equal(second[1], first[1])
++
++    empty = analyze_mask(np.zeros((8, 9), dtype=bool))
++    empty_geometry = refine_graph_geometry(empty)
++    empty_walk = refined_walk(empty_geometry, covering_walk(empty.graph))
++    assert empty_walk.xy.shape == (0, 2)
++
++    isolated_mask = np.zeros((8, 9), dtype=bool)
++    isolated_mask[4, 5] = True
++    isolated = analyze_mask(isolated_mask)
++    isolated_geometry = refine_graph_geometry(isolated)
++    isolated_walk = refined_walk(isolated_geometry, covering_walk(isolated.graph))
++    assert isolated_walk.xy.shape == (1, 2)
++
++
++def _capsule_field(shape, start, end, radius):
++    y, x = np.mgrid[: shape[0], : shape[1]]
++    points = np.stack((x, y), axis=-1)
++    start = np.asarray(start, dtype=float)
++    vector = np.asarray(end, dtype=float) - start
++    parameter = np.clip(
++        np.sum((points - start) * vector, axis=-1) / np.dot(vector, vector),
++        0.0,
++        1.0,
++    )
++    nearest = start + parameter[..., None] * vector
++    return radius - np.linalg.norm(points - nearest, axis=-1)
++
++
++def _polyline_field(shape, points, radius):
++    y, x = np.mgrid[: shape[0], : shape[1]]
++    grid = np.stack((x.ravel(), y.ravel()), axis=-1)
++    distance = np.full(len(grid), np.inf)
++    for start, end in zip(points[:-1], points[1:], strict=True):
++        vector = end - start
++        parameter = np.clip(
++            np.sum((grid - start) * vector, axis=1) / np.dot(vector, vector),
++            0.0,
++            1.0,
++        )
++        nearest = start + parameter[:, None] * vector
++        distance = np.minimum(distance, np.linalg.norm(grid - nearest, axis=1))
++    return radius - distance.reshape(shape)
++
++
++def _cubic_bezier(control, parameter):
++    t = parameter[:, None]
++    one_minus = 1.0 - t
++    p0, p1, p2, p3 = control
++    xy = one_minus**3 * p0 + 3 * one_minus**2 * t * p1 + 3 * one_minus * t**2 * p2 + t**3 * p3
++    first = 3 * one_minus**2 * (p1 - p0) + 6 * one_minus * t * (p2 - p1) + 3 * t**2 * (p3 - p2)
++    second = 6 * one_minus * (p2 - 2 * p1 + p0) + 6 * t * (p3 - 2 * p2 + p1)
++    cross = first[:, 0] * second[:, 1] - first[:, 1] * second[:, 0]
++    curvature = cross / np.linalg.norm(first, axis=1) ** 3
++    return xy, first, curvature
++
++
++@pytest.mark.parametrize("center_y", [10.1, 10.25, 10.5, 10.75, 10.9])
++def test_fractional_offset_straight_strokes_are_subpixel(center_y):
++    shape = (32, 70)
++    field = _capsule_field(shape, (7.0, center_y), (62.0, center_y), 2.5)
++    analysis = analyze_mask(field > 0.0)
++    geometry = refine_graph_geometry(analysis, decision_field=field)
++    assert len(geometry.edges) == 1
++
++    edge = geometry.edges[0]
++    assert abs(float(np.median(edge.xy[:, 1])) - center_y) <= 0.12
++    interior = (edge.xy[:, 0] > 15.0) & (edge.xy[:, 0] < 54.0)
++    heading_error = np.degrees(np.arccos(np.clip(np.abs(edge.tangent[interior, 0]), 0.0, 1.0)))
++    assert float(np.sqrt(np.mean(heading_error**2))) <= 0.5
++
++
++@pytest.mark.parametrize("angle_degrees", [7.0, 23.0, 41.0, 68.0, 83.0])
++def test_rotated_straight_strokes_remove_pixel_staircase(angle_degrees):
++    angle = np.radians(angle_degrees)
++    tangent = np.asarray((np.cos(angle), np.sin(angle)))
++    center = np.asarray((40.0, 40.0))
++    start, end = center - 24.0 * tangent, center + 24.0 * tangent
++    field = _capsule_field((82, 82), start, end, 2.8)
++    analysis = analyze_mask(field > 0.0)
++    geometry = refine_graph_geometry(analysis, decision_field=field)
++    assert len(geometry.edges) == 1
++
++    edge = geometry.edges[0]
++    progress = (edge.xy - start) @ tangent
++    interior = (progress > 7.0) & (progress < 41.0)
++    alignment = np.clip(np.abs(edge.tangent[interior] @ tangent), 0.0, 1.0)
++    heading_error = np.degrees(np.arccos(alignment))
++    assert float(np.sqrt(np.mean(heading_error**2))) <= 1.5
++
++
++@pytest.mark.parametrize("rotation_degrees", [0.0, 45.0, 90.0])
++def test_circular_arc_geometry_tracks_position_and_signed_curvature(rotation_degrees):
++    center = np.asarray((36.0, 36.0))
++    radius = 17.0
++    rotation = np.radians(rotation_degrees)
++    start_angle, end_angle = -1.1 + rotation, 1.1 + rotation
++    y, x = np.mgrid[:72, :72]
++    points = np.stack((x, y), axis=-1)
++    angle = np.arctan2(points[..., 1] - center[1], points[..., 0] - center[0])
++    clipped = np.clip(angle, start_angle, end_angle)
++    nearest = center + radius * np.stack((np.cos(clipped), np.sin(clipped)), axis=-1)
++    field = 2.6 - np.linalg.norm(points - nearest, axis=-1)
++    analysis = analyze_mask(field > 0.0)
++    geometry = refine_graph_geometry(analysis, decision_field=field)
++    assert len(geometry.edges) == 1
++
++    edge = geometry.edges[0]
++    recovered_radius = np.linalg.norm(edge.xy - center, axis=1)
++    theta = np.arctan2(edge.xy[:, 1] - center[1], edge.xy[:, 0] - center[0])
++    interior = (theta > start_angle + 0.2) & (theta < end_angle - 0.2)
++    errors = np.abs(recovered_radius[interior] - radius)
++    assert float(np.median(errors)) <= 0.20
++    analytic_tangent = np.column_stack((-np.sin(theta[interior]), np.cos(theta[interior])))
++    direction = np.sign(np.sum(edge.tangent[interior] * analytic_tangent, axis=1))
++    assert np.all(edge.curvature[interior] * direction > 0.0)
++    curvature_error = np.abs(edge.curvature[interior] * radius - direction)
++    assert float(np.median(curvature_error)) <= 0.1
++
++
++def test_curvature_radius_guard_rejects_cross_sections():
++    center = np.asarray((24.0, 24.0))
++    radius = 7.0
++    start_angle, end_angle = -1.0, 1.0
++    y, x = np.mgrid[:48, :48]
++    points = np.stack((x, y), axis=-1)
++    angle = np.arctan2(points[..., 1] - center[1], points[..., 0] - center[0])
++    clipped = np.clip(angle, start_angle, end_angle)
++    nearest = center + radius * np.stack((np.cos(clipped), np.sin(clipped)), axis=-1)
++    field = 2.4 - np.linalg.norm(points - nearest, axis=-1)
++    analysis = analyze_mask(field > 0.0)
++    options = SubpixelCenterlineOptions(max_curvature_radius=0.1)
++    geometry = refine_graph_geometry(analysis, decision_field=field, options=options)
++
++    assert geometry.edges[0].diagnostics.invalid_reason_counts["high_curvature_radius"] > 0
++
++
++def test_cubic_s_curve_tangent_and_curvature_follow_ground_truth():
++    control = np.asarray(((7.0, 42.0), (20.0, 5.0), (48.0, 66.0), (63.0, 24.0)))
++    parameters = np.linspace(0.0, 1.0, 300)
++    centerline, analytic_tangent, analytic_curvature = _cubic_bezier(control, parameters)
++    field = _polyline_field((72, 72), centerline, 2.5)
++    analysis = analyze_mask(field > 0.0)
++    geometry = refine_graph_geometry(analysis, decision_field=field)
++    assert len(geometry.edges) == 1
++
++    edge = geometry.edges[0]
++    distances = np.linalg.norm(edge.xy[:, None, :] - centerline[None, :, :], axis=2)
++    nearest = np.argmin(distances, axis=1)
++    interior = (nearest > 20) & (nearest < len(parameters) - 20)
++    alignment = np.clip(
++        np.abs(np.sum(edge.tangent[interior] * analytic_tangent[nearest[interior]], axis=1)),
++        0.0,
++        1.0,
++    )
++    heading_error = np.degrees(np.arccos(alignment))
++    assert float(np.sqrt(np.mean(heading_error**2))) <= 5.0
++    orientation = np.sign(
++        np.sum(edge.tangent[interior] * analytic_tangent[nearest[interior]], axis=1)
++    )
++    expected_curvature = analytic_curvature[nearest[interior]] * orientation
++    correlation = np.corrcoef(edge.curvature[interior], expected_curvature)[0, 1]
++    assert correlation > 0.6
++
++
++def test_straight_stroke_resolution_invariance_preserves_topology():
++    base_center = (31.0, 14.25)
++    topologies = []
++    centers = []
++    headings = []
++    for scale in (1, 2, 4):
++        shape = (40 * scale, 72 * scale)
++        field = _capsule_field(
++            shape,
++            (7.0 * scale, base_center[1] * scale),
++            (64.0 * scale, base_center[1] * scale),
++            2.5 * scale,
++        )
++        analysis = analyze_mask(field > 0.0)
++        geometry = refine_graph_geometry(analysis, decision_field=field)
++        topologies.append(
++            (
++                analysis.graph.component_count,
++                len(analysis.graph.edges),
++                analysis.graph.cycle_count,
++            )
++        )
++        edge = geometry.edges[0]
++        centers.append(float(np.median(edge.xy[:, 1])) / scale)
++        normalized_vertical = np.abs(
++            edge.tangent[:, 1] / np.maximum(np.linalg.norm(edge.tangent, axis=1), 1e-12)
++        )
++        headings.append(float(np.median(normalized_vertical)))
++
++    assert topologies[0] == topologies[1] == topologies[2]
++    errors = np.abs(np.asarray(centers) - base_center[1])
++    assert max(errors) <= 0.12
++    assert max(headings) <= 0.02

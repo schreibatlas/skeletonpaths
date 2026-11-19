@@ -1,0 +1,34 @@
+{
+  "candidate_count": 1,
+  "candidates": [
+    {
+      "additions": 2110,
+      "deletions": 1,
+      "patch_file": "1d4fff8.patch",
+      "patch_sha256": "0d101f62b4c0b0700bb2ff13ef06d9a9c73a76ac0912f67bd0fcdcf665f2b4e8",
+      "paths": [
+        "benchmarks/benchmark_subpixel.py",
+        "docs/index.md",
+        "docs/reference/api.md",
+        "docs/subpixel-centerlines.md",
+        "skeletonpaths/__init__.py",
+        "skeletonpaths/core.py",
+        "skeletonpaths/model.py",
+        "skeletonpaths/subpixel.py",
+        "tests/test_benchmark_subpixel.py",
+        "tests/test_subpixel.py"
+      ],
+      "sha": "1d4fff867d70f3ea5370caeb13b57f1255cd6331",
+      "short_sha": "1d4fff8",
+      "source_ref": "git:1d4fff867d70f3ea5370caeb13b57f1255cd6331"
+    }
+  ],
+  "git_base_ref": "d5b323abd45073d211b83bf86f5505b6cbe23367",
+  "git_base_sha": "d5b323abd45073d211b83bf86f5505b6cbe23367",
+  "git_head_ref": "1d4fff867d70f3ea5370caeb13b57f1255cd6331",
+  "git_head_sha": "1d4fff867d70f3ea5370caeb13b57f1255cd6331",
+  "include_merges": "nontrivial",
+  "object_type": "git_evidence_manifest",
+  "release_version": "v0.1.4",
+  "schema_version": 1
+}

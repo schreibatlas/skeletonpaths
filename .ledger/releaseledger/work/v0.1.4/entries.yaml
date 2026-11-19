@@ -1,0 +1,33 @@
+schema: releaseledger.entry-batch.v1
+operation: create
+schema_version: 1
+object_type: release_entry_batch
+release_version: v0.1.4
+git_base_ref: d5b323abd45073d211b83bf86f5505b6cbe23367
+git_base_sha: d5b323abd45073d211b83bf86f5505b6cbe23367
+git_head_ref: 1d4fff867d70f3ea5370caeb13b57f1255cd6331
+git_head_sha: 1d4fff867d70f3ea5370caeb13b57f1255cd6331
+include_merges: nontrivial
+entries:
+- kind: added
+  summary: Added topology-preserving subpixel centerline refinement and refined-walk geometry
+  status: accepted
+  source_refs:
+  - git:1d4fff867d70f3ea5370caeb13b57f1255cd6331
+  paths:
+  - benchmarks/benchmark_subpixel.py
+  - docs/index.md
+  - docs/reference/api.md
+  - docs/subpixel-centerlines.md
+  - skeletonpaths/__init__.py
+  - skeletonpaths/core.py
+  - skeletonpaths/model.py
+  - skeletonpaths/subpixel.py
+  - tests/test_benchmark_subpixel.py
+  - tests/test_subpixel.py
+  sources:
+  - git:1d4fff867d70f3ea5370caeb13b57f1255cd6331
+  prs: []
+  issues: []
+  contributors:
+  - '@holgern'

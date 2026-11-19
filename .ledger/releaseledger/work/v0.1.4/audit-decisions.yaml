@@ -1,0 +1,22 @@
+rows:
+- sha: 1d4fff867d70f3ea5370caeb13b57f1255cd6331
+  inspected: true
+  inspected_paths:
+  - benchmarks/benchmark_subpixel.py
+  - docs/index.md
+  - docs/reference/api.md
+  - docs/subpixel-centerlines.md
+  - skeletonpaths/__init__.py
+  - skeletonpaths/core.py
+  - skeletonpaths/model.py
+  - skeletonpaths/subpixel.py
+  - tests/test_benchmark_subpixel.py
+  - tests/test_subpixel.py
+  observed_behavior: >-
+    Introduces additive subpixel centerline refinement from a signed decision field or a mask-derived distance field, with edge geometry and diagnostics; refined walks preserve existing graph edge IDs and directions.
+  public_impact: public
+  decision: accepted
+  target_entry_key: null
+  target_entry_id: null
+  notes: ''
+  stale: false
