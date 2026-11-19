@@ -20,6 +20,10 @@ from .model import (
     PathSearchLimitError,
     PathSearchLimits,
     PathSelection,
+    RefinedEdgeDiagnostics,
+    RefinedEdgeGeometry,
+    RefinedSkeletonGeometry,
+    RefinedWalkGeometry,
     RouteStep,
     SkeletonAnalysis,
     SkeletonEdge,
@@ -33,11 +37,18 @@ from .model import (
     StrokeSearchLimitError,
     StrokeSearchLimits,
     StrokeSearchPolicy,
+    SubpixelCenterlineOptions,
     TopologyPathInventory,
     TopologyRoute,
 )
 from .ranking import rank_paths, rank_topology_paths, select_path, select_topology_path
 from .routing import prepare_topology_paths
+from .subpixel import (
+    SubpixelReconstructionError,
+    SubpixelReconstructionLimitError,
+    refine_graph_geometry,
+    refined_walk,
+)
 from .walk import DisconnectedGraphError, covering_walk
 
 __all__ = [
@@ -55,6 +66,10 @@ __all__ = [
     "PathSearchLimitError",
     "PathSearchLimits",
     "PathSelection",
+    "RefinedEdgeDiagnostics",
+    "RefinedEdgeGeometry",
+    "RefinedSkeletonGeometry",
+    "RefinedWalkGeometry",
     "RouteStep",
     "SkeletonAnalysis",
     "SkeletonEdge",
@@ -68,6 +83,9 @@ __all__ = [
     "StrokeSearchLimitError",
     "StrokeSearchLimits",
     "StrokeSearchPolicy",
+    "SubpixelCenterlineOptions",
+    "SubpixelReconstructionError",
+    "SubpixelReconstructionLimitError",
     "TopologyPathInventory",
     "TopologyRoute",
     "analyze_mask",
@@ -80,6 +98,8 @@ __all__ = [
     "rank_covering_walks",
     "rank_paths",
     "rank_topology_paths",
+    "refine_graph_geometry",
+    "refined_walk",
     "select_path",
     "select_topology_path",
     "stroke_hypotheses_from_analysis",

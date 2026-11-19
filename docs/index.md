@@ -36,8 +36,9 @@ guide/path-selection
 guide/ambiguity-and-ranking
 guide/search-limits
 guide/planarcurve
+subpixel-centerlines
 reference/behavior-contracts
 reference/api
 ```
 
-Start with the {doc}`getting-started` guide, which covers mask analysis, route selection, and bounded multi-stroke hypotheses. The conceptual guides explain {doc}`guide/graph-construction`, {doc}`guide/path-selection`, {doc}`guide/ambiguity-and-ranking`, and {doc}`guide/search-limits`. See the {doc}`reference/behavior-contracts` and {doc}`reference/api` for exact guarantees and the supported package-root API. See the {doc}`changelog` for release history.
+Start with the {doc}`getting-started` guide, which covers mask analysis, route selection, and bounded multi-stroke hypotheses. The conceptual guides explain {doc}`guide/graph-construction`, {doc}`guide/path-selection`, {doc}`guide/ambiguity-and-ranking`, {doc}`guide/search-limits`, {doc}`guide/planarcurve`, and {doc}`subpixel-centerlines`. See the {doc}`reference/behavior-contracts` and {doc}`reference/api` for exact guarantees and the supported package-root API. See the {doc}`changelog` for release history.

@@ -1179,3 +1179,294 @@ class TopologyPathInventory:
                 if current != route.end_node:
                     raise ValueError("route endpoints do not match its edge sequence")
         object.__setattr__(self, "paths_by_kind", MappingProxyType(paths_by_kind))
+
+
+@dataclass(frozen=True)
+class SubpixelCenterlineOptions:
+    """Bounded controls for reconstructing continuous centerline geometry."""
+
+    normal_sample_step_px: float = 0.125
+    max_normal_search_px: float | None = None
+    tangent_window_px: float = 4.0
+    junction_guard_px: float = 2.0
+    min_boundary_gradient: float = 0.02
+    min_sample_confidence: float = 0.05
+    refinement_passes: int = 2
+    spline_options: object | None = None
+    output_spacing_px: float = 0.25
+    max_curvature_radius: float = 0.8
+    max_refinement_samples: int = 100_000
+    max_normal_probes: int = 2_000_000
+
+    def __post_init__(self) -> None:
+        for name in (
+            "normal_sample_step_px",
+            "tangent_window_px",
+            "output_spacing_px",
+            "max_curvature_radius",
+        ):
+            value = getattr(self, name)
+            if not np.isfinite(value) or value <= 0.0:
+                raise ValueError(f"{name} must be finite and positive")
+            object.__setattr__(self, name, float(value))
+        for name in ("junction_guard_px", "min_boundary_gradient"):
+            value = getattr(self, name)
+            if not np.isfinite(value) or value < 0.0:
+                raise ValueError(f"{name} must be finite and nonnegative")
+            object.__setattr__(self, name, float(value))
+        if self.max_normal_search_px is not None:
+            if (
+                not np.isfinite(self.max_normal_search_px)
+                or self.max_normal_search_px <= 0.0
+                or self.max_normal_search_px > 64.0
+            ):
+                raise ValueError("max_normal_search_px must be positive and no greater than 64")
+            object.__setattr__(self, "max_normal_search_px", float(self.max_normal_search_px))
+        if (
+            not np.isfinite(self.min_sample_confidence)
+            or not 0.0 <= self.min_sample_confidence <= 1.0
+        ):
+            raise ValueError("min_sample_confidence must be between zero and one")
+        if (
+            isinstance(self.refinement_passes, bool)
+            or not isinstance(self.refinement_passes, (int, np.integer))
+            or not 1 <= self.refinement_passes <= 3
+        ):
+            raise ValueError("refinement_passes must be an integer between one and three")
+        if (
+            isinstance(self.max_refinement_samples, bool)
+            or not isinstance(self.max_refinement_samples, (int, np.integer))
+            or self.max_refinement_samples < 1
+        ):
+            raise ValueError("max_refinement_samples must be a positive integer")
+        object.__setattr__(self, "refinement_passes", int(self.refinement_passes))
+        object.__setattr__(self, "max_refinement_samples", int(self.max_refinement_samples))
+        if (
+            isinstance(self.max_normal_probes, bool)
+            or not isinstance(self.max_normal_probes, (int, np.integer))
+            or self.max_normal_probes < 1
+        ):
+            raise ValueError("max_normal_probes must be a positive integer")
+        object.__setattr__(self, "max_normal_probes", int(self.max_normal_probes))
+
+
+def _subpixel_array(values: object, *, name: str, columns: int | None = None) -> np.ndarray:
+    array = np.array(values, dtype=float, copy=True)
+    if array.ndim != (2 if columns is not None else 1):
+        raise ValueError(f"{name} must have {2 if columns is not None else 1} dimensions")
+    if columns is not None and array.shape[1] != columns:
+        raise ValueError(f"{name} must have shape (N, {columns})")
+    if not np.isfinite(array).all():
+        raise ValueError(f"{name} must contain only finite values")
+    array.setflags(write=False)
+    return array
+
+
+@dataclass(frozen=True)
+class RefinedEdgeDiagnostics:
+    """Bounded evidence and fitting diagnostics for one refined edge."""
+
+    raw_point_count: int
+    valid_cross_section_count: int
+    invalid_reason_counts: Mapping[str, int]
+    median_shift_px: float
+    p95_shift_px: float
+    median_spline_residual_px: float
+    p95_spline_residual_px: float
+    selected_control_count: int
+    first_pass_improvement_px: float
+    junction_guard_sample_count: int
+    max_abs_curvature_radius: float
+    normal_probe_count: int
+    spline_fit_count: int
+
+    def __post_init__(self) -> None:
+        for name in (
+            "raw_point_count",
+            "valid_cross_section_count",
+            "selected_control_count",
+            "junction_guard_sample_count",
+            "normal_probe_count",
+            "spline_fit_count",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or value < 0:
+                raise ValueError(f"{name} must be a nonnegative integer")
+            object.__setattr__(self, name, int(value))
+        if self.valid_cross_section_count > self.raw_point_count:
+            raise ValueError("valid cross-section count cannot exceed the raw point count")
+        for name in (
+            "median_shift_px",
+            "p95_shift_px",
+            "median_spline_residual_px",
+            "p95_spline_residual_px",
+            "max_abs_curvature_radius",
+        ):
+            value = getattr(self, name)
+            if not np.isfinite(value) or value < 0.0:
+                raise ValueError(f"{name} must be finite and nonnegative")
+            object.__setattr__(self, name, float(value))
+        if not np.isfinite(self.first_pass_improvement_px):
+            raise ValueError("first_pass_improvement_px must be finite")
+        object.__setattr__(self, "first_pass_improvement_px", float(self.first_pass_improvement_px))
+        reasons = dict(self.invalid_reason_counts)
+        if any(not isinstance(key, str) or not key for key in reasons):
+            raise ValueError("invalid reason names must be nonempty strings")
+        if any(
+            isinstance(count, bool) or not isinstance(count, (int, np.integer)) or count < 0
+            for count in reasons.values()
+        ):
+            raise ValueError("invalid reason counts must be nonnegative integers")
+        object.__setattr__(
+            self,
+            "invalid_reason_counts",
+            MappingProxyType({key: int(value) for key, value in reasons.items()}),
+        )
+
+
+@dataclass(frozen=True)
+class RefinedEdgeGeometry:
+    """Continuous geometry for one graph edge in ``(column, row)`` coordinates."""
+
+    edge_id: int
+    xy: np.ndarray
+    tangent: np.ndarray
+    curvature: np.ndarray
+    radius_px: np.ndarray
+    confidence: np.ndarray
+    length_px: float
+    source: Literal["decision-field", "binary-distance-fallback"]
+    diagnostics: RefinedEdgeDiagnostics
+    curve_segments: tuple[object, ...] = ()
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.edge_id, bool)
+            or not isinstance(self.edge_id, (int, np.integer))
+            or self.edge_id < 0
+        ):
+            raise ValueError("edge_id must be a nonnegative integer")
+        xy = _subpixel_array(self.xy, name="xy", columns=2)
+        tangent = _subpixel_array(self.tangent, name="tangent", columns=2)
+        curvature = _subpixel_array(self.curvature, name="curvature")
+        radius = _subpixel_array(self.radius_px, name="radius_px")
+        confidence = _subpixel_array(self.confidence, name="confidence")
+        if len(xy) < 2:
+            raise ValueError("refined edge geometry must contain at least two points")
+        if any(len(values) != len(xy) for values in (tangent, curvature, radius, confidence)):
+            raise ValueError("refined edge geometry arrays must have matching lengths")
+        if np.any(radius < 0.0):
+            raise ValueError("radius_px must be nonnegative")
+        if np.any((confidence < 0.0) | (confidence > 1.0)):
+            raise ValueError("confidence must be between zero and one")
+        if not np.isfinite(self.length_px) or self.length_px <= 0.0:
+            raise ValueError("length_px must be finite and positive")
+        if self.source not in {"decision-field", "binary-distance-fallback"}:
+            raise ValueError("unsupported refined edge source")
+        if not isinstance(self.diagnostics, RefinedEdgeDiagnostics):
+            raise TypeError("diagnostics must be RefinedEdgeDiagnostics")
+        curves = tuple(self.curve_segments)
+        object.__setattr__(self, "edge_id", int(self.edge_id))
+        object.__setattr__(self, "xy", xy)
+        object.__setattr__(self, "tangent", tangent)
+        object.__setattr__(self, "curvature", curvature)
+        object.__setattr__(self, "radius_px", radius)
+        object.__setattr__(self, "confidence", confidence)
+        object.__setattr__(self, "length_px", float(self.length_px))
+        object.__setattr__(self, "curve_segments", curves)
+
+
+@dataclass(frozen=True)
+class RefinedSkeletonGeometry:
+    """Refined edge geometries tied to their unchanged discrete skeleton graph."""
+
+    analysis: SkeletonAnalysis
+    edges: tuple[RefinedEdgeGeometry, ...]
+    node_xy: Mapping[int, Point]
+    node_confidence: Mapping[int, float]
+    node_radius_px: Mapping[int, float]
+    diagnostics: Mapping[str, int | float | str]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.analysis, SkeletonAnalysis):
+            raise TypeError("analysis must be a SkeletonAnalysis")
+        edges = tuple(self.edges)
+        if any(not isinstance(edge, RefinedEdgeGeometry) for edge in edges):
+            raise TypeError("edges must contain RefinedEdgeGeometry values")
+        edge_ids = tuple(edge.edge_id for edge in edges)
+        if len(edges) != len(self.analysis.graph.edges) or edge_ids != tuple(range(len(edges))):
+            raise ValueError("refined edges must preserve every graph edge ID in order")
+        node_ids = {node.id for node in self.analysis.graph.nodes}
+        node_xy = {
+            int(key): (float(value[0]), float(value[1])) for key, value in self.node_xy.items()
+        }
+        node_confidence = {int(key): float(value) for key, value in self.node_confidence.items()}
+        node_radius = {int(key): float(value) for key, value in self.node_radius_px.items()}
+        if any(set(values) != node_ids for values in (node_xy, node_confidence, node_radius)):
+            raise ValueError("refined node maps must contain exactly the graph node IDs")
+        if any(not np.isfinite(point).all() for point in node_xy.values()):
+            raise ValueError("refined node coordinates must be finite")
+        if any(
+            not np.isfinite(value) or not 0.0 <= value <= 1.0 for value in node_confidence.values()
+        ):
+            raise ValueError("node confidence must be between zero and one")
+        if any(not np.isfinite(value) or value < 0.0 for value in node_radius.values()):
+            raise ValueError("node radius must be finite and nonnegative")
+        object.__setattr__(self, "edges", edges)
+        object.__setattr__(self, "node_xy", MappingProxyType(node_xy))
+        object.__setattr__(self, "node_confidence", MappingProxyType(node_confidence))
+        object.__setattr__(self, "node_radius_px", MappingProxyType(node_radius))
+        object.__setattr__(self, "diagnostics", MappingProxyType(dict(self.diagnostics)))
+
+    @property
+    def graph(self) -> SkeletonGraph:
+        """The unchanged discrete graph from the source analysis."""
+        return self.analysis.graph
+
+    @property
+    def edge_by_id(self) -> Mapping[int, RefinedEdgeGeometry]:
+        """Immutable edge lookup keyed by the original graph edge ID."""
+        return MappingProxyType({edge.edge_id: edge for edge in self.edges})
+
+
+@dataclass(frozen=True)
+class RefinedWalkGeometry:
+    """Continuous samples assembled from a discrete walk without changing its events."""
+
+    xy: np.ndarray
+    tangent: np.ndarray
+    curvature: np.ndarray
+    radius_px: np.ndarray
+    confidence: np.ndarray
+    length_px: float
+    edge_ids: tuple[int, ...]
+    edge_directions: tuple[Literal["forward", "reverse"], ...]
+
+    def __post_init__(self) -> None:
+        xy = _subpixel_array(self.xy, name="xy", columns=2)
+        tangent = _subpixel_array(self.tangent, name="tangent", columns=2)
+        curvature = _subpixel_array(self.curvature, name="curvature")
+        radius = _subpixel_array(self.radius_px, name="radius_px")
+        confidence = _subpixel_array(self.confidence, name="confidence")
+        if any(len(values) != len(xy) for values in (tangent, curvature, radius, confidence)):
+            raise ValueError("refined walk geometry arrays must have matching lengths")
+        if np.any(radius < 0.0) or np.any((confidence < 0.0) | (confidence > 1.0)):
+            raise ValueError("walk radius and confidence values are out of range")
+        if not np.isfinite(self.length_px) or self.length_px < 0.0:
+            raise ValueError("length_px must be finite and nonnegative")
+        edge_ids = tuple(int(value) for value in self.edge_ids)
+        directions = tuple(self.edge_directions)
+        if any(value < 0 for value in edge_ids):
+            raise ValueError("walk edge IDs must be nonnegative")
+        if len(edge_ids) != len(directions) or any(
+            direction not in {"forward", "reverse"} for direction in directions
+        ):
+            raise ValueError("walk directions must match its edge sequence")
+        object.__setattr__(self, "xy", xy)
+        object.__setattr__(self, "tangent", tangent)
+        object.__setattr__(self, "curvature", curvature)
+        object.__setattr__(self, "radius_px", radius)
+        object.__setattr__(self, "confidence", confidence)
+        object.__setattr__(self, "length_px", float(self.length_px))
+        object.__setattr__(self, "edge_ids", edge_ids)
+        object.__setattr__(self, "edge_directions", directions)

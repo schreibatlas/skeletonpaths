@@ -42,6 +42,41 @@ The package root, `skeletonpaths`, is the supported import surface. The explicit
 
 
 ## Route enumeration, ranking, and selection
+## Subpixel centerline geometry
+
+```{eval-rst}
+.. autofunction:: skeletonpaths.refine_graph_geometry
+```
+
+```{eval-rst}
+.. autofunction:: skeletonpaths.refined_walk
+```
+
+```{eval-rst}
+.. autoclass:: skeletonpaths.SubpixelCenterlineOptions
+   :members:
+```
+
+```{eval-rst}
+.. autoclass:: skeletonpaths.RefinedEdgeDiagnostics
+   :members:
+```
+
+```{eval-rst}
+.. autoclass:: skeletonpaths.RefinedEdgeGeometry
+   :members:
+```
+
+```{eval-rst}
+.. autoclass:: skeletonpaths.RefinedSkeletonGeometry
+   :members:
+```
+
+```{eval-rst}
+.. autoclass:: skeletonpaths.RefinedWalkGeometry
+   :members:
+```
+
 
 ```{eval-rst}
 .. autofunction:: skeletonpaths.prepare_topology_paths
@@ -187,6 +222,17 @@ The package root, `skeletonpaths`, is the supported import surface. The explicit
 
 ```{eval-rst}
 .. autoclass:: skeletonpaths.JunctionPairingLimitError
+   :members:
+```
+
+## Subpixel reconstruction errors
+
+```{eval-rst}
+.. autoclass:: skeletonpaths.SubpixelReconstructionError
+```
+
+```{eval-rst}
+.. autoclass:: skeletonpaths.SubpixelReconstructionLimitError
    :members:
 ```
 
