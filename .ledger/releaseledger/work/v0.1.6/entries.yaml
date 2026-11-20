@@ -1,0 +1,64 @@
+schema: releaseledger.entry-batch.v1
+operation: create
+schema_version: 1
+object_type: release_entry_batch
+release_version: v0.1.6
+git_base_ref: c38998cab6c23aaa8d01a533790d713de5464277
+git_base_sha: c38998cab6c23aaa8d01a533790d713de5464277
+git_head_ref: 790bf668135724f8036b336f6c975a00dbc1c69c
+git_head_sha: 790bf668135724f8036b336f6c975a00dbc1c69c
+include_merges: nontrivial
+entries:
+- kind: changed
+  summary: Changed junction cleanup to merge nearby corridor-linked regions while preserving endpoints and independent crossings
+  status: accepted
+  breaking: true
+  source_refs:
+  - git:790bf668135724f8036b336f6c975a00dbc1c69c
+  paths:
+  - README.md
+  - docs/getting-started.md
+  - docs/guide/graph-construction.md
+  - skeletonpaths/graph.py
+  - tests/test_junction_regions.py
+  sources:
+  - git:790bf668135724f8036b336f6c975a00dbc1c69c
+  prs: []
+  issues: []
+  contributors:
+  - '@holgern'
+- kind: added
+  summary: Added raw, provisional, and semantic junction counts to graph and mask-analysis diagnostics
+  status: accepted
+  source_refs: []
+  paths:
+  - docs/guide/graph-construction.md
+  - docs/reference/api.md
+  - skeletonpaths/model.py
+  - tests/test_junction_regions.py
+  sources:
+  - git:790bf668135724f8036b336f6c975a00dbc1c69c
+  prs: []
+  issues: []
+  contributors:
+  - '@holgern'
+- kind: added
+  summary: Added stroke-count diversity to covering-walk ranking and a global-reversal orientation variant API
+  status: accepted
+  source_refs: []
+  paths:
+  - README.md
+  - docs/getting-started.md
+  - docs/reference/api.md
+  - skeletonpaths/__init__.py
+  - skeletonpaths/core.py
+  - skeletonpaths/hypotheses.py
+  - skeletonpaths/model.py
+  - tests/test_multistroke.py
+  - tests/test_stroke_search_limits.py
+  sources:
+  - git:790bf668135724f8036b336f6c975a00dbc1c69c
+  prs: []
+  issues: []
+  contributors:
+  - '@holgern'

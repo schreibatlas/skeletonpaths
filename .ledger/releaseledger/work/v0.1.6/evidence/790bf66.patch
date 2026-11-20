@@ -1,0 +1,1036 @@
+ README.md                          |  18 ++-
+ docs/getting-started.md            |   5 +-
+ docs/guide/graph-construction.md   |   6 +-
+ docs/reference/api.md              |   7 +
+ skeletonpaths/__init__.py          |   2 +
+ skeletonpaths/core.py              |   2 +
+ skeletonpaths/graph.py             | 289 +++++++++++++++++++++++++++++--------
+ skeletonpaths/hypotheses.py        |  56 +++++++
+ skeletonpaths/model.py             |  35 +++++
+ tests/test_junction_regions.py     |  96 +++++++++++-
+ tests/test_multistroke.py          | 177 +++++++++++++++++++++++
+ tests/test_stroke_search_limits.py |  13 ++
+ 12 files changed, 636 insertions(+), 70 deletions(-)
+
+diff --git a/README.md b/README.md
+index 5fe64ab..e9f52b1 100644
+--- a/README.md
++++ b/README.md
+@@ -59,7 +59,7 @@ The Sphinx guides and API reference explain graph construction, route selection,
+
+ 1. Supply a two-dimensional binary mask or already-thinned skeleton. Boolean arrays and finite numeric arrays containing only `0` and `1` are accepted. NaN, infinity, and other numeric values are rejected.
+ 2. `graph_from_mask()` optionally removes small components, derives radius values from the source mask with a Euclidean distance transform when no radius map is supplied, and skeletonizes the remaining mask. `graph_from_skeleton()` skips skeletonization and defaults radius values to zero when no radius map is supplied.
+-3. Bridge-aware pixel adjacency is compressed into semantic graph nodes and edges. Endpoints remain distinct; raw degree-greater-than-two pixels are contracted into bounded junction regions using local stroke radius when available. A degree-two-only component receives a deterministic cycle anchor. Junction node degree is its boundary-port count, and degree-two chains become graph edges. Pass `junction_options=JunctionRegionOptions(...)` to configure contraction. Short spurs are preserved unless a positive pruning threshold is set.
++3. Bridge-aware pixel adjacency is compressed into provisional junction regions and graph edges. A semantic cleanup stage considers short graph corridors, normalized local radius, port tangents, confidence, and crossing/endpoint protection instead of globally increasing the merge radius. The graph exposes raw, provisional, and semantic junction counts. A degree-two-only component receives a deterministic cycle anchor; endpoints remain distinct and self-edges count two ports.
+ 4. Use `rank_paths()` and `select_path()` for simple route selection. Use `rank_covering_walks()` for bounded multi-walk hypotheses, including explicit repeats, junction pairing alternatives, and ambiguity evidence.
+ 5. Pass candidate `xy` geometry and optional guide paths to PlanarCurve-backed scoring. Geometry and orientation help rank hypotheses but do not establish historical pen behavior.
+
+@@ -70,6 +70,9 @@ Input arrays use image indexing `[row, column]`. Public coordinates use `(x=colu
+ Pixel adjacency uses orthogonal neighbors and permits a diagonal neighbor only when neither orthogonal bridge pixel is foreground. Raw junction seeds are skeleton pixels with degree greater than two. Nearby seeds are contracted into bounded semantic regions using geodesic neighborhoods scaled by the local ink radius; without a radius map, pre-thinned input contracts only directly or near-adjacent seeds conservatively. Endpoints are never absorbed. A region's representative node degree is the count of its boundary ports, with a self-edge contributing two ports. A single physical junction may be encountered multiple times in a traversal without becoming multiple graph nodes.
+
+
++A second semantic cleanup stage can consolidate provisional regions connected by a short, tangent-continuous graph corridor with local radius and confidence support. It does not merge clearly independent crossings, and endpoints remain protected. `raw_junction_seed_count`, `provisional_junction_count`, and `semantic_junction_count` distinguish the three topology stages; `junction_count` remains the semantic count.
++
++
+ Graph edges represent undirected raster evidence. Their stored endpoint and edge order is deterministic for geometry assembly, not physical drawing order. `SkeletonPath` is a non-repeating route through part of a graph; `SkeletonWalk` is an ordered traversal that may repeat edges to cover a connected graph.
+
+ `graph_from_mask()` uses eight-neighbor connected-component labeling when `min_component_area` is greater than zero. Components smaller than the requested area are removed before skeletonization. A supplied `radius` map must match the image shape and contain finite nonnegative values. A supplied `confidence` map must match the image shape and contain values between zero and one.
+@@ -78,8 +81,8 @@ Graph edges represent undirected raster evidence. Their stored endpoint and edge
+
+ The public models are frozen. Graph and path collections are tuples, graph and path coordinate arrays are read-only, and inventory mappings are immutable.
+
+-- `SkeletonGraph` contains nodes, edges, and semantic `junction_regions`, with `component_count`, `cycle_count`, `endpoint_count`, `junction_count`, and `raw_junction_seed_count` diagnostics.
+-- `SkeletonAnalysis` contains owned read-only mask, skeleton, radius, and confidence arrays, optional component labels, graph, semantic junction regions, and the raw junction-seed count.
++- `SkeletonGraph` contains nodes, edges, and semantic `junction_regions`, with `component_count`, `cycle_count`, `endpoint_count`, `junction_count`, `raw_junction_seed_count`, `provisional_junction_count`, and `semantic_junction_count` diagnostics.
++- `SkeletonAnalysis` contains owned read-only mask, skeleton, radius, and confidence arrays, optional component labels, graph, semantic junction regions, and raw, provisional, and semantic junction counts.
+ - `JunctionRegion` reports one representative node, center, local radius, absorbed support pixels, boundary-port count, and aggregate confidence. `JunctionRegionOptions` controls bounded region contraction.
+ - `SkeletonNode.degree` is semantic port degree for junctions. Self-edges count twice, once for each port.
+ - `SkeletonNode` records its integer ID, `(x, y)` coordinate, degree, radius in pixels, and confidence.
+@@ -92,7 +95,7 @@ The public models are frozen. Graph and path collections are tuples, graph and p
+ - `TopologyPathInventory` stores enumerated routes by the requested path kinds for reuse during ranking.
+ - `RouteStep` identifies one edge and its explicit `a-to-b` or `b-to-a` traversal direction.
+ - `JunctionPairing` records generic tangent-ranked branch pairs and unpaired edges, not physical truth.
+-- `StrokeHypothesis` contains walks, covered and uncovered edges, repeated-edge evidence, lift count, separate score dimensions, pairing candidates, and route, orientation, and component-order ambiguity.
++- `StrokeHypothesis` contains topology traversal candidates, covered and uncovered edges, repeated-edge evidence, lift count, separate score dimensions, pairing candidates, route/orientation/component-order ambiguity, and an `orientation_relation` label.
+ - `StrokeSearchLimits` and `StrokeSearchPolicy` configure hard bounds and separate ranking penalties.
+
+
+@@ -160,6 +163,11 @@ Each `StrokeHypothesisScore` preserves coverage error, uncovered length, repeat
+
+ A repeat is evidence about a hypothesis only. `repeat_required_by_hypothesis` never means that the source was observed to be retraced. Orientation flags and component ordering likewise describe ambiguity in candidate explanations, not recovered history. If the requested result `limit` omits lower-ranked candidates, each returned hypothesis sets `truncated=True`.
+
++
++`diversity="none"` preserves legacy global ranking. Opt into `diversity="stroke-count"` to retain the best full-coverage candidate for each stroke-count family, including the minimum-stroke candidate, before filling remaining slots by global rank. Scores and search limits are unchanged. This is candidate preservation, not a handwriting-semantic selection or a claim that any route is historically correct.
++
++`orientation_variants(hypothesis)` returns the supplied traversal candidate and its global reversal. The reversal reverses both walk order and each walk, and its `orientation_relation` is labeled `"global-reversal"`. Unresolved orientation remains ambiguous; neither ordering is a recovered pen start or historical trace.
++
+ `StrokeSearchLimits` bounds each search stage. Defaults are:
+
+ | Limit | Default | Bound |
+@@ -181,7 +189,7 @@ The supported package-root exports are:
+
+ - Constants: `DEFAULT_MAX_PATHS`, `DEFAULT_RANKING_POLICY`, `DEFAULT_SEARCH_LIMITS`, `DEFAULT_STROKE_SEARCH_LIMITS`, `DEFAULT_STROKE_SEARCH_POLICY`, and `__version__`.
+ - Models and errors: `DisconnectedGraphError`, `JunctionPairing`, `JunctionPairingLimitError`, `JunctionRegion`, `JunctionRegionOptions`, `NoFeasiblePathError`, path scoring and limit types, `RouteStep`, `SkeletonAnalysis`, graph/image/path/walk models, `StrokeHypothesis`, `StrokeHypothesisScore`, `StrokeSearchLimitError`, `StrokeSearchLimits`, `StrokeSearchPolicy`, `TopologyPathInventory`, and `TopologyRoute`.
+-- Graph, image, and hypothesis functions: `analyze_mask`, `build_skeleton_graph`, `covering_walk`, `graph_from_mask`, `graph_from_skeleton`, `prune_spurs`, `rank_covering_walks`, and `stroke_hypotheses_from_analysis`.
++- Graph, image, and hypothesis functions: `analyze_mask`, `build_skeleton_graph`, `covering_walk`, `graph_from_mask`, `graph_from_skeleton`, `prune_spurs`, `orientation_variants`, `rank_covering_walks`, and `stroke_hypotheses_from_analysis`.
+ - Route functions: `prepare_topology_paths`, `rank_paths`, and `select_path`.
+
+ `graph_from_skeleton()` is the lightweight entry point for pre-thinned images. `graph_from_mask()` uses the optional image dependencies. `build_skeleton_graph()` is the lower-level graph constructor and skeletonizes by default unless `already_skeleton=True`.
+diff --git a/docs/getting-started.md b/docs/getting-started.md
+index de3e04e..a16c4eb 100644
+--- a/docs/getting-started.md
++++ b/docs/getting-started.md
+@@ -99,7 +99,7 @@ See {doc}`guide/graph-construction` for validation, dependency, and propagation
+
+ ## Rank multi-stroke hypotheses
+
+-`rank_covering_walks()` returns several bounded explanations of the graph. `stroke_hypotheses_from_analysis()` starts from mask analysis and includes connected-component alternatives. Scores, repeated edges, lifts, branch pairings, and ambiguity remain evidence about hypotheses, not observations of pen history.
++`rank_covering_walks()` returns bounded ranked traversal candidates from graph topology. `stroke_hypotheses_from_analysis()` starts from mask analysis and includes connected-component alternatives. Scores, repeated edges, lifts, branch pairings, and ambiguity describe candidate evidence, not observed pen history. Pass `diversity="stroke-count"` to retain the best full-coverage candidate per stroke-count family, including the minimum-stroke family, before filling remaining slots by global rank. The default `"none"` preserves legacy ranking, and diversity does not change scores.
+
+ ```{literalinclude} ../examples/11_stroke_hypotheses.py
+ :language: python
+@@ -107,6 +107,9 @@ See {doc}`guide/graph-construction` for validation, dependency, and propagation
+
+ Each result reports separate coverage, repeat, turning, junction, lift, guide, and cycle score dimensions. A `truncated` flag identifies when the caller-requested result limit omitted lower-ranked alternatives. Search-limit exceptions include the configured bound, observed value, and search stage.
+
++
++Use {func}`skeletonpaths.orientation_variants` to inspect both the supplied traversal and its global reversal. The reversal reverses the walk sequence and each walk, and labels the relation as `"global-reversal"`. This exposes an alternative; it does not resolve `orientation_ambiguous` or identify a historical pen start.
++
+ ## Inspect a selection
+
+ {func}`skeletonpaths.select_path` returns a {class}`skeletonpaths.PathSelection`, not a {class}`skeletonpaths.SkeletonPath` directly:
+diff --git a/docs/guide/graph-construction.md b/docs/guide/graph-construction.md
+index c111d6e..2b744b4 100644
+--- a/docs/guide/graph-construction.md
++++ b/docs/guide/graph-construction.md
+@@ -40,6 +40,7 @@ Orthogonal foreground neighbors connect. A diagonal pair connects only when neit
+ - Degree-one endpoints remain separate graph nodes and are never absorbed into a junction region.
+ - Pixels with raster degree greater than two are raw junction seeds, not automatically separate semantic graph nodes.
+ - Nearby seeds are contracted into bounded junction regions using geodesic skeleton neighborhoods scaled by local ink radius from the source mask or supplied map. Without a radius map, pre-thinned input contracts only directly or near-adjacent seeds conservatively.
++- A semantic cleanup stage examines provisional junctions joined by short graph corridors. It uses connector length relative to local radius, port tangent continuity, confidence, and port-count/crossing evidence, while preserving endpoints and independent crossings. It does not globally increase the initial merge radius.
+ - Each region has one representative node. Its graph degree is the number of boundary ports, so a self-edge contributes two ports.
+ - An all-degree-two connected component receives a deterministic cycle anchor. Degree-two chains outside regions become graph edges.
+ - Edge length is the assembled polyline length in pixels; graph-local edge IDs are implementation identifiers, not stable across topology-model upgrades.
+@@ -81,10 +82,9 @@ The mask and confidence example is maintained in `examples/` and included here w
+ ```
+
+ ## Graph diagnostics
++{class}`skeletonpaths.SkeletonGraph` exposes graph-level `component_count`, `cycle_count`, `endpoint_count`, `junction_count`, `raw_junction_seed_count`, `provisional_junction_count`, and `semantic_junction_count`. `junction_count` is the semantic junction count. The graph cycle diagnostic is the cyclomatic count `max(0, |E| - |V| + component_count)`. It describes the whole graph, not a route. See {doc}`path-selection` for route-level cycle constraints.
+
+-{class}`skeletonpaths.SkeletonGraph` exposes graph-level `component_count`, `cycle_count`, `endpoint_count`, and `junction_count`. The graph cycle diagnostic is the cyclomatic count `max(0, |E| - |V| + component_count)`. It describes the whole graph, not a route. See {doc}`path-selection` for route-level cycle constraints.
+
+-
+-`junction_count` counts semantic regions, not raw high-degree skeleton pixels or how often a walk encounters a region. `SkeletonGraph.raw_junction_seed_count` and `SkeletonAnalysis.raw_junction_seed_count` are engineering diagnostics. `SkeletonAnalysis.junction_regions` exposes immutable `JunctionRegion` records with representative center, radius, absorbed support pixels, port count, and confidence. The representative node's degree equals its port count; a self-edge contributes two ports, while a traversal may visit the same semantic region more than once.
++`raw_junction_seed_count` counts raw high-degree skeleton pixels. `provisional_junction_count` counts regions after the existing radius-aware discovery stage, before semantic cleanup. `semantic_junction_count` (also `junction_count`) counts final regions. `SkeletonAnalysis` exposes the same diagnostics and its immutable `JunctionRegion` records include representative center, radius, absorbed support pixels, port count, and confidence. The representative node's degree equals its port count; a self-edge contributes two ports, while a traversal may visit the same semantic region more than once.
+
+ An empty skeleton is valid input and produces an empty graph.
+diff --git a/docs/reference/api.md b/docs/reference/api.md
+index 6d1446f..c9a70b7 100644
+--- a/docs/reference/api.md
++++ b/docs/reference/api.md
+@@ -41,6 +41,13 @@ The package root, `skeletonpaths`, is the supported import surface. The explicit
+ ```
+
+
++```{eval-rst}
++.. autofunction:: skeletonpaths.orientation_variants
++```
++
++`diversity="stroke-count"` retains full-coverage stroke-count families before filling the result limit. It does not alter candidate scores. `orientation_variants()` returns the supplied hypothesis and its globally reversed traversal; the returned `orientation_relation` distinguishes the two without asserting historical direction.
++
++
+ ## Route enumeration, ranking, and selection
+ ## Subpixel centerline geometry
+
+diff --git a/skeletonpaths/__init__.py b/skeletonpaths/__init__.py
+index 1c5ee78..9f81859 100644
+--- a/skeletonpaths/__init__.py
++++ b/skeletonpaths/__init__.py
+@@ -46,6 +46,7 @@ from .core import (
+     covering_walk,
+     graph_from_mask,
+     graph_from_skeleton,
++    orientation_variants,
+     prepare_topology_paths,
+     prune_spurs,
+     rank_covering_walks,
+@@ -111,6 +112,7 @@ __all__ = [
+     "graph_from_skeleton",
+     "prepare_topology_paths",
+     "prune_spurs",
++    "orientation_variants",
+     "rank_covering_walks",
+     "rank_paths",
+     "rank_topology_paths",
+diff --git a/skeletonpaths/core.py b/skeletonpaths/core.py
+index 4a4fa71..b98ab37 100644
+--- a/skeletonpaths/core.py
++++ b/skeletonpaths/core.py
+@@ -4,6 +4,7 @@ from .graph import build_skeleton_graph, graph_from_skeleton, prune_spurs
+ from .hypotheses import (
+     DEFAULT_STROKE_SEARCH_LIMITS,
+     DEFAULT_STROKE_SEARCH_POLICY,
++    orientation_variants,
+     rank_covering_walks,
+     stroke_hypotheses_from_analysis,
+ )
+@@ -95,6 +96,7 @@ __all__ = [
+     "graph_from_skeleton",
+     "prepare_topology_paths",
+     "prune_spurs",
++    "orientation_variants",
+     "rank_covering_walks",
+     "rank_paths",
+     "rank_topology_paths",
+diff --git a/skeletonpaths/graph.py b/skeletonpaths/graph.py
+index 252dfbd..fbc418c 100644
+--- a/skeletonpaths/graph.py
++++ b/skeletonpaths/graph.py
+@@ -324,6 +324,197 @@ def _trace_graph_edges(
+     return edges, ports
+
+
++def _node_specs_from_regions(
++    region_supports: list[set[Pixel]],
++    adjacency: dict[Pixel, tuple[Pixel, ...]],
++    components: list[set[Pixel]],
++    degrees: dict[Pixel, int],
++    radius_map: np.ndarray | None,
++    confidence_map: np.ndarray,
++    options: JunctionRegionOptions,
++) -> list[tuple[Pixel, set[Pixel], bool, float, float]]:
++    region_specs = []
++    for support in region_supports:
++        representative, region_radius = _region_representative(
++            support, radius_map, options.representative
++        )
++        region_confidence = float(
++            np.mean([confidence_map[row, column] for row, column in sorted(support)])
++        )
++        region_specs.append((representative, support, True, region_radius, region_confidence))
++
++    absorbed = set().union(*(support for support in region_supports)) if region_supports else set()
++    node_specs = list(region_specs)
++    for pixel, degree in sorted(degrees.items()):
++        if degree != 2 and pixel not in absorbed:
++            node_specs.append((pixel, {pixel}, False, 0.0, 0.0))
++
++    for component in components:
++        if not any(pixel in absorbed or degrees[pixel] != 2 for pixel in component):
++            anchor = min(component)
++            node_specs.append((anchor, {anchor}, False, 0.0, 0.0))
++
++    node_specs.sort(key=lambda item: (item[0], not item[2]))
++    return node_specs
++
++
++def _assemble_skeleton_graph(
++    node_specs: list[tuple[Pixel, set[Pixel], bool, float, float]],
++    adjacency: dict[Pixel, tuple[Pixel, ...]],
++    radius_map: np.ndarray | None,
++    confidence_map: np.ndarray,
++    raw_seed_count: int,
++    provisional_junction_count: int,
++) -> SkeletonGraph:
++    node_pixels = [spec[0] for spec in node_specs]
++    node_supports = [spec[1] for spec in node_specs]
++    edges, ports = _trace_graph_edges(
++        node_supports, node_pixels, adjacency, radius_map, confidence_map
++    )
++    nodes = []
++    junction_regions = []
++    for node_id, (pixel, support, is_region, region_radius, region_confidence) in enumerate(
++        node_specs
++    ):
++        if is_region:
++            radius_value = region_radius
++            confidence_value = region_confidence
++            port_count = len(ports[node_id])
++            junction_regions.append(
++                JunctionRegion(
++                    node_id=node_id,
++                    xy=(float(pixel[1]), float(pixel[0])),
++                    radius_px=radius_value,
++                    support_pixels=tuple(sorted(support)),
++                    port_count=port_count,
++                    confidence=confidence_value,
++                )
++            )
++        else:
++            radius_value, confidence_value = _radius_and_confidence(
++                pixel, radius_map, confidence_map
++            )
++            port_count = len(ports[node_id])
++        nodes.append(
++            SkeletonNode(
++                id=node_id,
++                xy=(float(pixel[1]), float(pixel[0])),
++                degree=port_count,
++                radius_px=radius_value,
++                confidence=confidence_value,
++            )
++        )
++
++    return SkeletonGraph(
++        tuple(nodes),
++        tuple(edges),
++        tuple(junction_regions),
++        raw_junction_seed_count=raw_seed_count,
++        provisional_junction_count=provisional_junction_count,
++    )
++
++
++def _edge_port_tangent(edge: SkeletonEdge, side: str) -> np.ndarray:
++    vector = edge.xy[1] - edge.xy[0] if side == "a" else edge.xy[-2] - edge.xy[-1]
++    length = float(np.linalg.norm(vector))
++    return vector / length if length > 1e-12 else np.zeros(2, dtype=float)
++
++
++def _is_independent_crossing(graph: SkeletonGraph, node_id: int) -> bool:
++    tangents = []
++    for edge in graph.edges:
++        if edge.a == node_id:
++            tangents.append(_edge_port_tangent(edge, "a"))
++        if edge.b == node_id:
++            tangents.append(_edge_port_tangent(edge, "b"))
++    if len(tangents) < 4 or len(tangents) % 2:
++        return False
++
++    def pairable(remaining: tuple[int, ...]) -> bool:
++        if not remaining:
++            return True
++        first = remaining[0]
++        for index, second in enumerate(remaining[1:], start=1):
++            if float(np.dot(tangents[first], tangents[second])) <= -0.85 and pairable(
++                remaining[1:index] + remaining[index + 1 :]
++            ):
++                return True
++        return False
++
++    return pairable(tuple(range(len(tangents))))
++
++
++def _semantic_junction_cleanup(
++    graph: SkeletonGraph,
++    region_supports: list[set[Pixel]],
++    adjacency: dict[Pixel, tuple[Pixel, ...]],
++) -> list[set[Pixel]]:
++    regions = {region.node_id: region for region in graph.junction_regions}
++    nodes = {node.id: node for node in graph.nodes}
++    candidates: dict[tuple[int, int], tuple[tuple[float, float, float, int], int]] = {}
++    for edge_id, edge in enumerate(graph.edges):
++        if edge.a == edge.b or edge.a not in regions or edge.b not in regions:
++            continue
++        first, second = sorted((edge.a, edge.b))
++        if _is_independent_crossing(graph, first) or _is_independent_crossing(graph, second):
++            continue
++
++        local_radius = max(
++            edge.mean_radius_px,
++            (regions[first].radius_px + regions[second].radius_px) / 2.0,
++        )
++        if local_radius <= 0.0:
++            continue
++        normalized_length = edge.length_px / local_radius
++        if normalized_length > 4.0:
++            continue
++        confidence = min(
++            edge.confidence,
++            regions[first].confidence,
++            regions[second].confidence,
++        )
++        if confidence < 0.5:
++            continue
++        if float(np.dot(_edge_port_tangent(edge, "a"), _edge_port_tangent(edge, "b"))) > -0.5:
++            continue
++        if nodes[first].degree + nodes[second].degree - 2 < 3:
++            continue
++
++        key = (normalized_length, edge.length_px, -confidence, edge_id)
++        previous = candidates.get((first, second))
++        if previous is None or key < previous[0]:
++            candidates[first, second] = (key, edge_id)
++
++    if not candidates:
++        return region_supports
++
++    parent = {node_id: node_id for node_id in regions}
++    supports = {node_id: set(region.support_pixels) for node_id, region in regions.items()}
++
++    def find(node_id: int) -> int:
++        while parent[node_id] != node_id:
++            parent[node_id] = parent[parent[node_id]]
++            node_id = parent[node_id]
++        return node_id
++
++    ordered_candidates = sorted((key, pair, edge_id) for pair, (key, edge_id) in candidates.items())
++    for _, (first, second), edge_id in ordered_candidates:
++        first_root, second_root = find(first), find(second)
++        if first_root == second_root:
++            continue
++        root, child = sorted((first_root, second_root))
++        edge = graph.edges[edge_id]
++        corridor = {
++            (int(round(y)), int(round(x)))
++            for x, y in edge.xy
++            if (int(round(y)), int(round(x))) in adjacency
++        }
++        supports[root] = supports.pop(root) | supports.pop(child) | corridor
++        parent[child] = root
++
++    return [supports[root] for root in sorted(supports)]
++
++
+ def build_skeleton_graph(
+     observed_ink: ArrayLike,
+     *,
+@@ -411,65 +602,45 @@ def build_skeleton_graph(
+     region_supports = _junction_region_supports(
+         raw_seeds, adjacency, degrees, radius, junction_options
+     )
+-    region_specs = []
+-    for support in region_supports:
+-        representative, region_radius = _region_representative(
+-            support, radius, junction_options.representative
+-        )
+-        region_confidence = float(
+-            np.mean([confidence_map[row, column] for row, column in sorted(support)])
+-        )
+-        region_specs.append((representative, support, True, region_radius, region_confidence))
+-
+-    absorbed = set().union(*(support for support in region_supports)) if region_supports else set()
+-    node_specs = list(region_specs)
+-    for pixel, degree in sorted(degrees.items()):
+-        if degree != 2 and pixel not in absorbed:
+-            node_specs.append((pixel, {pixel}, False, 0.0, 0.0))
+-
+-    for component in components:
+-        if not any(pixel in absorbed or degrees[pixel] != 2 for pixel in component):
+-            anchor = min(component)
+-            node_specs.append((anchor, {anchor}, False, 0.0, 0.0))
+-
+-    node_specs.sort(key=lambda item: (item[0], not item[2]))
+-    node_pixels = [spec[0] for spec in node_specs]
+-    node_supports = [spec[1] for spec in node_specs]
+-    edges, ports = _trace_graph_edges(node_supports, node_pixels, adjacency, radius, confidence_map)
+-    nodes = []
+-    junction_regions = []
+-    for node_id, (pixel, support, is_region, region_radius, region_confidence) in enumerate(
+-        node_specs
+-    ):
+-        if is_region:
+-            radius_value = region_radius
+-            confidence_value = region_confidence
+-            port_count = len(ports[node_id])
+-            junction_regions.append(
+-                JunctionRegion(
+-                    node_id=node_id,
+-                    xy=(float(pixel[1]), float(pixel[0])),
+-                    radius_px=radius_value,
+-                    support_pixels=tuple(sorted(support)),
+-                    port_count=port_count,
+-                    confidence=confidence_value,
+-                )
+-            )
+-        else:
+-            radius_value, confidence_value = _radius_and_confidence(pixel, radius, confidence_map)
+-            port_count = len(ports[node_id])
+-        nodes.append(
+-            SkeletonNode(
+-                id=node_id,
+-                xy=(float(pixel[1]), float(pixel[0])),
+-                degree=port_count,
+-                radius_px=radius_value,
+-                confidence=confidence_value,
+-            )
+-        )
+-
+-    return SkeletonGraph(
+-        tuple(nodes), tuple(edges), tuple(junction_regions), raw_junction_seed_count=len(raw_seeds)
++    provisional_junction_count = len(region_supports) if region_supports else len(raw_seeds)
++    provisional_specs = _node_specs_from_regions(
++        region_supports,
++        adjacency,
++        components,
++        degrees,
++        radius,
++        confidence_map,
++        junction_options,
++    )
++    provisional_graph = _assemble_skeleton_graph(
++        provisional_specs,
++        adjacency,
++        radius,
++        confidence_map,
++        len(raw_seeds),
++        provisional_junction_count,
++    )
++    semantic_supports = (
++        _semantic_junction_cleanup(provisional_graph, region_supports, adjacency)
++        if junction_options.enabled and region_supports
++        else region_supports
++    )
++    final_specs = _node_specs_from_regions(
++        semantic_supports,
++        adjacency,
++        components,
++        degrees,
++        radius,
++        confidence_map,
++        junction_options,
++    )
++    return _assemble_skeleton_graph(
++        final_specs,
++        adjacency,
++        radius,
++        confidence_map,
++        len(raw_seeds),
++        provisional_junction_count,
+     )
+
+
+diff --git a/skeletonpaths/hypotheses.py b/skeletonpaths/hypotheses.py
+index d1351fe..e059ecc 100644
+--- a/skeletonpaths/hypotheses.py
++++ b/skeletonpaths/hypotheses.py
+@@ -3,6 +3,7 @@ from __future__ import annotations
+ from collections import deque
+ from collections.abc import Sequence
+ from dataclasses import replace
++from typing import Literal
+
+ import numpy as np
+ from numpy.typing import ArrayLike
+@@ -505,6 +506,54 @@ def _signature(hypothesis: StrokeHypothesis) -> tuple[object, ...]:
+     return routes, pairings
+
+
++def _stroke_count_diverse_subset(
++    ranked: list[StrokeHypothesis], limit: int
++) -> list[StrokeHypothesis]:
++    best_by_stroke_count = {}
++    for hypothesis in ranked:
++        if not hypothesis.uncovered_edge_ids:
++            best_by_stroke_count.setdefault(hypothesis.stroke_count, hypothesis)
++    if not best_by_stroke_count:
++        return ranked[:limit]
++
++    minimum_stroke_count = min(best_by_stroke_count)
++    minimum_candidate = best_by_stroke_count[minimum_stroke_count]
++    family_signatures = {_signature(hypothesis) for hypothesis in best_by_stroke_count.values()}
++    selected_signatures = {_signature(minimum_candidate)}
++    for hypothesis in ranked:
++        signature = _signature(hypothesis)
++        if signature in family_signatures and signature not in selected_signatures:
++            if len(selected_signatures) == limit:
++                break
++            selected_signatures.add(signature)
++    for hypothesis in ranked:
++        if len(selected_signatures) == limit:
++            break
++        selected_signatures.add(_signature(hypothesis))
++    return [hypothesis for hypothesis in ranked if _signature(hypothesis) in selected_signatures]
++
++
++def orientation_variants(
++    hypothesis: StrokeHypothesis,
++) -> tuple[StrokeHypothesis, StrokeHypothesis]:
++    """Return the supplied hypothesis and its global reversal.
++
++    The returned orientation relation is relative to the supplied hypothesis. A
++    global reversal reverses the walk sequence and every walk without changing
++    score, coverage, or other traversal evidence.
++    """
++    if not isinstance(hypothesis, StrokeHypothesis):
++        raise TypeError("hypothesis must be a StrokeHypothesis")
++    supplied = replace(hypothesis, orientation_relation="as-supplied")
++    reversed_hypothesis = replace(
++        supplied,
++        walks=tuple(walk.reversed() for walk in reversed(supplied.walks)),
++        orientation_ambiguous_strokes=tuple(reversed(supplied.orientation_ambiguous_strokes)),
++        orientation_relation="global-reversal",
++    )
++    return supplied, reversed_hypothesis
++
++
+ def rank_covering_walks(
+     graph: SkeletonGraph,
+     *,
+@@ -514,6 +563,7 @@ def rank_covering_walks(
+     limits: StrokeSearchLimits | None = None,
+     limit: int = 5,
+     policy: StrokeSearchPolicy = DEFAULT_STROKE_SEARCH_POLICY,
++    diversity: Literal["none", "stroke-count"] = "none",
+ ) -> tuple[StrokeHypothesis, ...]:
+     """Rank bounded multi-walk explanations of every edge in a skeleton graph.
+
+@@ -532,6 +582,8 @@ def rank_covering_walks(
+         raise TypeError("policy must be a StrokeSearchPolicy")
+     if isinstance(limit, bool) or not isinstance(limit, (int, np.integer)) or limit < 1:
+         raise ValueError("limit must be a positive integer")
++    if diversity not in ("none", "stroke-count"):
++        raise ValueError("diversity must be 'none' or 'stroke-count'")
+     if expected_strokes is not None and (
+         isinstance(expected_strokes, bool)
+         or not isinstance(expected_strokes, (int, np.integer))
+@@ -617,6 +669,8 @@ def rank_covering_walks(
+         )
+         marked.append(replace(hypothesis, route_ambiguous=ambiguous))
+     is_truncated = len(marked) > int(limit)
++    if diversity == "stroke-count":
++        marked = _stroke_count_diverse_subset(marked, int(limit))
+     return tuple(replace(item, truncated=is_truncated) for item in marked[: int(limit)])
+
+
+@@ -629,6 +683,7 @@ def stroke_hypotheses_from_analysis(
+     limits: StrokeSearchLimits | None = None,
+     limit: int = 5,
+     policy: StrokeSearchPolicy = DEFAULT_STROKE_SEARCH_POLICY,
++    diversity: Literal["none", "stroke-count"] = "none",
+ ) -> tuple[StrokeHypothesis, ...]:
+     """Search the graph in a ``SkeletonAnalysis`` result."""
+     if not isinstance(analysis, SkeletonAnalysis):
+@@ -641,4 +696,5 @@ def stroke_hypotheses_from_analysis(
+         limits=limits,
+         limit=limit,
+         policy=policy,
++        diversity=diversity,
+     )
+diff --git a/skeletonpaths/model.py b/skeletonpaths/model.py
+index 82307e5..3d9b67c 100644
+--- a/skeletonpaths/model.py
++++ b/skeletonpaths/model.py
+@@ -224,6 +224,7 @@ class SkeletonGraph:
+     edges: tuple[SkeletonEdge, ...]
+     junction_regions: tuple[JunctionRegion, ...] = ()
+     raw_junction_seed_count: int = 0
++    provisional_junction_count: int | None = None
+
+     def __post_init__(self) -> None:
+         nodes = tuple(self.nodes)
+@@ -255,8 +256,24 @@ class SkeletonGraph:
+             or raw_count < 0
+         ):
+             raise ValueError("raw junction seed count must be a nonnegative integer")
++        provisional_count = self.provisional_junction_count
++        semantic_count = (
++            len(junction_regions) if junction_regions else sum(node.degree > 2 for node in nodes)
++        )
++        if provisional_count is None:
++            provisional_count = semantic_count
++        if (
++            isinstance(provisional_count, bool)
++            or not isinstance(provisional_count, (int, np.integer))
++            or provisional_count < semantic_count
++        ):
++            raise ValueError(
++                "provisional junction count must be an integer "
++                "at least as large as the semantic count"
++            )
+         object.__setattr__(self, "junction_regions", junction_regions)
+         object.__setattr__(self, "raw_junction_seed_count", int(raw_count))
++        object.__setattr__(self, "provisional_junction_count", int(provisional_count))
+         object.__setattr__(self, "nodes", nodes)
+         object.__setattr__(self, "edges", edges)
+
+@@ -304,6 +321,11 @@ class SkeletonGraph:
+             else sum(node.degree > 2 for node in self.nodes)
+         )
+
++    @property
++    def semantic_junction_count(self) -> int:
++        """Number of junction regions after semantic cleanup."""
++        return self.junction_count
++
+
+ @dataclass(frozen=True)
+ class SkeletonImage:
+@@ -420,6 +442,16 @@ class SkeletonAnalysis(SkeletonImage):
+         """Number of raw high-degree skeleton pixels before region contraction."""
+         return self.graph.raw_junction_seed_count
+
++    @property
++    def provisional_junction_count(self) -> int:
++        """Number of junction regions before semantic cleanup."""
++        return self.graph.provisional_junction_count
++
++    @property
++    def semantic_junction_count(self) -> int:
++        """Number of junction regions after semantic cleanup."""
++        return self.graph.semantic_junction_count
++
+     @property
+     def component_count(self) -> int:
+         return self.graph.component_count
+@@ -832,6 +864,7 @@ class StrokeHypothesis:
+     orientation_ambiguous_strokes: tuple[bool, ...] = ()
+     repeat_required_by_hypothesis: bool = False
+     truncated: bool = False
++    orientation_relation: Literal["as-supplied", "global-reversal"] = "as-supplied"
+
+     def __post_init__(self) -> None:
+         walks = tuple(self.walks)
+@@ -874,6 +907,8 @@ class StrokeHypothesis:
+             or any(not isinstance(value, bool) for value in orientation)
+         ):
+             raise ValueError("per-stroke orientation ambiguity must match the walks")
++        if self.orientation_relation not in {"as-supplied", "global-reversal"}:
++            raise ValueError("orientation relation must be 'as-supplied' or 'global-reversal'")
+         object.__setattr__(self, "walks", walks)
+         object.__setattr__(self, "covered_edge_ids", frozenset(int(edge) for edge in covered))
+         object.__setattr__(self, "uncovered_edge_ids", frozenset(int(edge) for edge in uncovered))
+diff --git a/tests/test_junction_regions.py b/tests/test_junction_regions.py
+index 49ed68a..12a6770 100644
+--- a/tests/test_junction_regions.py
++++ b/tests/test_junction_regions.py
+@@ -1,6 +1,7 @@
+ import numpy as np
+ import pytest
+ from scipy.ndimage import binary_dilation
++from skimage.draw import disk as draw_disk
+ from skimage.draw import line
+ from skimage.morphology import disk
+
+@@ -48,6 +49,37 @@ def _e_like_mask(scale, stroke_width, contact_gap, rotation=0):
+     return np.rot90(mask, rotation)
+
+
++def _realistic_e_contact_mask(scale=1, rotation=0):
++    mask = np.zeros((120 * scale, 130 * scale), dtype=bool)
++    baseline = 76 * scale
++
++    def draw_variable_stroke(points, radii):
++        for (x, y), radius in zip(points, radii, strict=True):
++            rows, columns = draw_disk((y, x), radius, shape=mask.shape)
++            mask[rows, columns] = True
++
++    baseline_x = np.arange(8 * scale, 111 * scale)
++    draw_variable_stroke(
++        np.column_stack((baseline_x, np.full_like(baseline_x, baseline))),
++        np.linspace(3 * scale, 4 * scale, len(baseline_x)),
++    )
++
++    gap = 16 * scale
++    start = np.asarray((40 * scale, baseline), dtype=float)
++    control_one = np.asarray((40 * scale + 0.28 * gap, baseline))
++    control_two = np.asarray((40 * scale + 0.72 * gap, baseline - 42 * scale))
++    end = np.asarray((40 * scale + gap, baseline), dtype=float)
++    parameter = np.linspace(0.0, 1.0, 200 * scale)
++    points = (
++        ((1.0 - parameter) ** 3)[:, None] * start
++        + (3.0 * (1.0 - parameter) ** 2 * parameter)[:, None] * control_one
++        + (3.0 * (1.0 - parameter) * parameter**2)[:, None] * control_two
++        + (parameter**3)[:, None] * end
++    )
++    draw_variable_stroke(points, np.linspace(4 * scale, 2.25 * scale, len(points)))
++    return np.rot90(mask, rotation)
++
++
+ @pytest.mark.parametrize(
+     ("scale", "stroke_width", "contact_gap", "rotation"),
+     (
+@@ -85,6 +117,66 @@ def test_e_like_loop_contracts_to_one_junction_and_remains_coverable(
+     )
+
+
++@pytest.mark.parametrize(("scale", "rotation"), ((1, 0), (2, 0), (1, 1), (1, 2), (1, 3)))
++def test_realistic_e_contact_does_not_create_spurious_second_semantic_junction(scale, rotation):
++    analysis = analyze_mask(_realistic_e_contact_mask(scale, rotation))
++    graph = analysis.graph
++
++    assert graph.endpoint_count == 2
++    assert graph.junction_count == 1
++    assert graph.semantic_junction_count == 1
++    assert graph.cycle_count == 1
++    assert graph.raw_junction_seed_count >= 2
++    assert graph.provisional_junction_count >= 2
++    assert analysis.provisional_junction_count == graph.provisional_junction_count
++    assert analysis.semantic_junction_count == graph.semantic_junction_count
++
++
++def test_semantic_cleanup_is_scale_stable():
++    graphs = [analyze_mask(_realistic_e_contact_mask(scale=scale)).graph for scale in (1, 2)]
++
++    assert [
++        (graph.endpoint_count, graph.junction_count, graph.cycle_count) for graph in graphs
++    ] == [
++        (2, 1, 1),
++        (2, 1, 1),
++    ]
++
++
++def test_semantic_cleanup_is_rotation_stable():
++    graphs = [
++        analyze_mask(_realistic_e_contact_mask(rotation=rotation)).graph for rotation in range(4)
++    ]
++
++    assert [
++        (graph.endpoint_count, graph.junction_count, graph.cycle_count) for graph in graphs
++    ] == [
++        (2, 1, 1),
++    ] * 4
++
++
++def test_semantic_cleanup_diagnostics_are_deterministic():
++    mask = _realistic_e_contact_mask()
++    first = analyze_mask(mask).graph
++    second = analyze_mask(mask).graph
++
++    assert (
++        first.raw_junction_seed_count,
++        first.provisional_junction_count,
++        first.semantic_junction_count,
++    ) == (
++        second.raw_junction_seed_count,
++        second.provisional_junction_count,
++        second.semantic_junction_count,
++    )
++    assert [(node.xy, node.degree) for node in first.nodes] == [
++        (node.xy, node.degree) for node in second.nodes
++    ]
++    assert [(edge.a, edge.b, edge.xy.tolist()) for edge in first.edges] == [
++        (edge.a, edge.b, edge.xy.tolist()) for edge in second.edges
++    ]
++
++
+ def test_junction_region_radius_tracks_stroke_width_and_scale():
+     thin = analyze_mask(_e_like_mask(1, 3, 4)).junction_regions[0].radius_px
+     wider = analyze_mask(_e_like_mask(1, 5, 6)).junction_regions[0].radius_px
+@@ -120,7 +212,7 @@ def test_diagonal_x_crossing_has_one_semantic_junction():
+     assert graph.junction_regions[0].port_count == 4
+
+
+-def test_radius_adaptive_regions_keep_separated_crossings_distinct():
++def test_semantic_cleanup_preserves_two_distinct_nearby_crossings():
+     skeleton = np.zeros((15, 19), dtype=bool)
+     skeleton[7, 1:18] = True
+     skeleton[2:13, 5] = True
+@@ -135,7 +227,7 @@ def test_radius_adaptive_regions_keep_separated_crossings_distinct():
+     assert [region.port_count for region in graph.junction_regions] == [4, 4]
+
+
+-def test_nearby_endpoint_is_not_absorbed_into_junction_region():
++def test_semantic_cleanup_never_absorbs_endpoint():
+     skeleton = np.zeros((12, 15), dtype=bool)
+     skeleton[7, 2:13] = True
+     skeleton[3:8, 7] = True
+diff --git a/tests/test_multistroke.py b/tests/test_multistroke.py
+index ec3c76f..94fd7e9 100644
+--- a/tests/test_multistroke.py
++++ b/tests/test_multistroke.py
+@@ -5,6 +5,7 @@ from skeletonpaths import (
+     SkeletonGraph,
+     SkeletonNode,
+     analyze_mask,
++    orientation_variants,
+     rank_covering_walks,
+     stroke_hypotheses_from_analysis,
+ )
+@@ -35,6 +36,32 @@ def _disconnected_graph():
+     return SkeletonGraph(nodes, tuple(edges))
+
+
++def _five_arm_graph():
++    endpoint_points = ((10.0, 0.0), (3.0, 9.0), (-8.0, 6.0), (-8.0, -6.0), (3.0, -9.0))
++    points = {0: (0.0, 0.0), **{index + 1: point for index, point in enumerate(endpoint_points)}}
++    nodes = (SkeletonNode(0, points[0], 5, 1.0, 1.0),) + tuple(
++        SkeletonNode(index + 1, point, 1, 1.0, 1.0) for index, point in enumerate(endpoint_points)
++    )
++    edges = []
++    for node_id in range(1, 6):
++        xy = np.asarray((points[0], points[node_id]))
++        length = float(np.linalg.norm(xy[1] - xy[0]))
++        edges.append(SkeletonEdge(0, node_id, xy, length, 1.0, 1.0))
++    return SkeletonGraph(nodes, tuple(edges))
++
++
++def _hypothesis_identity(hypothesis):
++    walks = tuple(
++        (walk.edge_ids, walk.edge_directions, walk.start_node, walk.end_node)
++        for walk in hypothesis.walks
++    )
++    pairings = tuple(
++        (pairing.node_id, pairing.port_pairs, pairing.unpaired_ports)
++        for pairing in hypothesis.junction_pairings
++    )
++    return walks, pairings
++
++
+ def test_disconnected_graph_reports_walks_lifts_and_order_ambiguity():
+     hypothesis = rank_covering_walks(_disconnected_graph())[0]
+
+@@ -58,3 +85,153 @@ def test_analysis_entry_point_orchestrates_component_hypotheses():
+     assert hypotheses[0].stroke_count == 2
+     assert hypotheses[0].component_order_ambiguous
+     assert hypotheses[0].covered_edge_ids == frozenset(range(len(analysis.graph.edges)))
++
++
++def test_stroke_count_diversity_preserves_one_walk_candidate_under_small_limit():
++    graph = _five_arm_graph()
++    legacy = rank_covering_walks(graph, limit=5, diversity="none")
++    diverse = rank_covering_walks(graph, limit=5, diversity="stroke-count")
++
++    all_edges = frozenset(range(len(graph.edges)))
++    all_candidates = rank_covering_walks(graph, limit=100, diversity="none")
++    best_by_stroke_count = {}
++    for hypothesis in all_candidates:
++        if not hypothesis.uncovered_edge_ids:
++            best_by_stroke_count.setdefault(
++                hypothesis.stroke_count, _hypothesis_identity(hypothesis)
++            )
++    diverse_identities = {_hypothesis_identity(item) for item in diverse}
++    assert set(best_by_stroke_count.values()) <= diverse_identities
++    assert len(diverse) == 5
++    assert any(
++        len(hypothesis.walks) == 1
++        and not hypothesis.uncovered_edge_ids
++        and hypothesis.covered_edge_ids == all_edges
++        for hypothesis in diverse
++    )
++    assert not any(len(hypothesis.walks) == 1 for hypothesis in legacy)
++
++
++def test_diversity_does_not_change_candidate_scores():
++    graph = _five_arm_graph()
++    all_candidates = rank_covering_walks(graph, limit=100, diversity="none")
++    diverse = rank_covering_walks(graph, limit=5, diversity="stroke-count")
++    scores = {_hypothesis_identity(item): item.score for item in all_candidates}
++
++    assert all(item.score == scores[_hypothesis_identity(item)] for item in diverse)
++
++
++def test_diversity_is_deterministic():
++    graph = _five_arm_graph()
++    first = rank_covering_walks(graph, limit=5, diversity="stroke-count")
++    second = rank_covering_walks(graph, limit=5, diversity="stroke-count")
++
++    assert [(_hypothesis_identity(item), item.score) for item in first] == [
++        (_hypothesis_identity(item), item.score) for item in second
++    ]
++
++
++def test_diversity_none_preserves_legacy_global_ranking():
++    graph = _five_arm_graph()
++    default = rank_covering_walks(graph, limit=5)
++    explicit_none = rank_covering_walks(graph, limit=5, diversity="none")
++
++    assert [_hypothesis_identity(item) for item in explicit_none] == [
++        _hypothesis_identity(item) for item in default
++    ]
++
++
++def test_analysis_entry_point_forwards_stroke_count_diversity():
++    mask = np.zeros((24, 40), dtype=bool)
++    mask[4:7, 2:17] = True
++    mask[15:18, 23:38] = True
++    analysis = analyze_mask(mask)
++
++    direct = rank_covering_walks(analysis.graph, limit=5, diversity="stroke-count")
++    through_analysis = stroke_hypotheses_from_analysis(analysis, limit=5, diversity="stroke-count")
++
++    assert [_hypothesis_identity(item) for item in through_analysis] == [
++        _hypothesis_identity(item) for item in direct
++    ]
++
++
++def test_global_reverse_preserves_covered_edges_and_length():
++    graph = _five_arm_graph()
++    all_edges = frozenset(range(len(graph.edges)))
++    hypothesis = next(
++        item
++        for item in rank_covering_walks(graph, limit=100)
++        if len(item.walks) == 1 and item.covered_edge_ids == all_edges
++    )
++
++    supplied, reverse = orientation_variants(hypothesis)
++
++    assert supplied.orientation_relation == "as-supplied"
++    assert reverse.orientation_relation == "global-reversal"
++    assert reverse.covered_edge_ids == hypothesis.covered_edge_ids
++    assert reverse.uncovered_edge_ids == hypothesis.uncovered_edge_ids
++    assert reverse.repeated_edge_ids == hypothesis.repeated_edge_ids
++    assert reverse.pen_lift_count == hypothesis.pen_lift_count
++    assert reverse.score == hypothesis.score
++    assert reverse.junction_pairings == hypothesis.junction_pairings
++    assert reverse.route_ambiguous == hypothesis.route_ambiguous
++    assert reverse.orientation_ambiguous == hypothesis.orientation_ambiguous
++    assert reverse.component_order_ambiguous == hypothesis.component_order_ambiguous
++    assert reverse.orientation_ambiguous_strokes == hypothesis.orientation_ambiguous_strokes
++    assert reverse.repeat_required_by_hypothesis == hypothesis.repeat_required_by_hypothesis
++    assert reverse.truncated == hypothesis.truncated
++    np.testing.assert_array_equal(reverse.walks[0].xy, hypothesis.walks[0].xy[::-1])
++    assert reverse.walks[0].covered_edge_ids == hypothesis.walks[0].covered_edge_ids
++    assert reverse.walks[0].length_px == hypothesis.walks[0].length_px
++
++
++def test_global_reverse_swaps_open_endpoints():
++    graph = _five_arm_graph()
++    all_edges = frozenset(range(len(graph.edges)))
++    hypothesis = next(
++        item
++        for item in rank_covering_walks(graph, limit=100)
++        if len(item.walks) == 1 and item.covered_edge_ids == all_edges
++    )
++    supplied, reverse = orientation_variants(hypothesis)
++    forward_walk = supplied.walks[0]
++    reversed_walk = reverse.walks[0]
++
++    assert graph.nodes[forward_walk.start_node].degree == 1
++    assert graph.nodes[forward_walk.end_node].degree == 1
++    assert reversed_walk.start_node == forward_walk.end_node
++    assert reversed_walk.end_node == forward_walk.start_node
++    assert reversed_walk.edge_ids == tuple(reversed(forward_walk.edge_ids))
++    assert reversed_walk.edge_directions == tuple(
++        "reverse" if direction == "forward" else "forward"
++        for direction in reversed(forward_walk.edge_directions)
++    )
++
++
++def test_global_reverse_reverses_multiwalk_order_and_each_walk():
++    hypothesis = rank_covering_walks(_disconnected_graph())[0]
++    supplied, reverse = orientation_variants(hypothesis)
++
++    assert len(reverse.walks) == len(supplied.walks)
++    assert reverse.orientation_ambiguous_strokes == tuple(
++        reversed(supplied.orientation_ambiguous_strokes)
++    )
++    for actual, original in zip(reverse.walks, reversed(supplied.walks), strict=True):
++        np.testing.assert_array_equal(actual.xy, original.xy[::-1])
++        assert actual.edge_ids == tuple(reversed(original.edge_ids))
++        assert actual.start_node == original.end_node
++        assert actual.end_node == original.start_node
++
++
++def test_unresolved_orientation_remains_ambiguous_in_both_variants():
++    graph = _five_arm_graph()
++    all_edges = frozenset(range(len(graph.edges)))
++    hypothesis = next(
++        item
++        for item in rank_covering_walks(graph, limit=100)
++        if len(item.walks) == 1 and item.covered_edge_ids == all_edges
++    )
++    supplied, reverse = orientation_variants(hypothesis)
++
++    assert supplied.orientation_ambiguous
++    assert reverse.orientation_ambiguous
+diff --git a/tests/test_stroke_search_limits.py b/tests/test_stroke_search_limits.py
+index f5fd50d..ef9cb26 100644
+--- a/tests/test_stroke_search_limits.py
++++ b/tests/test_stroke_search_limits.py
+@@ -68,3 +68,16 @@ def test_hypothesis_budget_and_walk_step_limits_are_hard_bounds():
+     )
+     with pytest.raises(StrokeSearchLimitError, match="max_walk_steps"):
+         rank_covering_walks(graph, limits=StrokeSearchLimits(max_walk_steps=1))
++
++
++@pytest.mark.parametrize("diversity", ("none", "stroke-count"))
++def test_diversity_does_not_bypass_hypothesis_or_walk_step_limits(diversity):
++    with pytest.raises(StrokeSearchLimitError, match="max_hypotheses"):
++        rank_covering_walks(
++            _star_graph(), limits=StrokeSearchLimits(max_hypotheses=1), diversity=diversity
++        )
++
++    with pytest.raises(StrokeSearchLimitError, match="max_walk_steps"):
++        rank_covering_walks(
++            _star_graph(), limits=StrokeSearchLimits(max_walk_steps=1), diversity=diversity
++        )

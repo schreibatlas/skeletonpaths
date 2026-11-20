@@ -1,0 +1,23 @@
+rows:
+- sha: 790bf668135724f8036b336f6c975a00dbc1c69c
+  inspected: true
+  inspected_paths:
+  - README.md
+  - docs/getting-started.md
+  - docs/guide/graph-construction.md
+  - docs/reference/api.md
+  - skeletonpaths/__init__.py
+  - skeletonpaths/core.py
+  - skeletonpaths/graph.py
+  - skeletonpaths/hypotheses.py
+  - skeletonpaths/model.py
+  - tests/test_junction_regions.py
+  - tests/test_multistroke.py
+  - tests/test_stroke_search_limits.py
+  observed_behavior: "Adds stroke-count-diverse covering-walk ranking and global-reversal variants, refines semantic junction merging using corridor geometry and confidence while preserving endpoints and independent crossings, and exposes raw, provisional, and semantic junction diagnostics."
+  public_impact: public
+  decision: accepted
+  target_entry_key: null
+  target_entry_id: null
+  notes: ''
+  stale: false

@@ -1,0 +1,40 @@
+schema_version: 1
+object_type: commit_audit_sheet
+versioning:
+  schema_version: 1
+  revision: 1
+release_version: v0.1.6
+git_base_ref: v0.1.5
+git_base_sha: c38998cab6c23aaa8d01a533790d713de5464277
+git_head_ref: HEAD
+git_head_sha: 790bf668135724f8036b336f6c975a00dbc1c69c
+git_range: c38998cab6c23aaa8d01a533790d713de5464277..790bf668135724f8036b336f6c975a00dbc1c69c
+commit_count: 1
+rows:
+- sha: 790bf668135724f8036b336f6c975a00dbc1c69c
+  source_ref: git:790bf668135724f8036b336f6c975a00dbc1c69c
+  short_sha: 790bf66
+  changed_paths:
+  - README.md
+  - docs/getting-started.md
+  - docs/guide/graph-construction.md
+  - docs/reference/api.md
+  - skeletonpaths/__init__.py
+  - skeletonpaths/core.py
+  - skeletonpaths/graph.py
+  - skeletonpaths/hypotheses.py
+  - skeletonpaths/model.py
+  - tests/test_junction_regions.py
+  - tests/test_multistroke.py
+  - tests/test_stroke_search_limits.py
+  stats:
+    files_changed: 12
+    insertions: 636
+    deletions: 70
+  inspected: false
+  inspected_paths: []
+  observed_behavior: ''
+  public_impact: unknown
+  decision: needs_review
+  stale: false
+  evidence_subject: 'feat: better search'

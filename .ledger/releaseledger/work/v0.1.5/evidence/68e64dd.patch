@@ -1564,4 +1564,3 @@ index 1eb996e..7d8efdb 100644
 +def test_junction_motifs_use_semantic_regions(segments, expected):
      graph = graph_from_skeleton(_draw_segments(segments))
      assert (graph.endpoint_count, graph.junction_count, graph.cycle_count) == expected
-

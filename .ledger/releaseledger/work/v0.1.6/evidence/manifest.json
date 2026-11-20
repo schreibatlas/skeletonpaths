@@ -1,0 +1,36 @@
+{
+  "candidate_count": 1,
+  "candidates": [
+    {
+      "additions": 636,
+      "deletions": 70,
+      "patch_file": "790bf66.patch",
+      "patch_sha256": "012194094f615304f14e6b52ea2787dee4dbba7ca82f839b723032d9f0323993",
+      "paths": [
+        "README.md",
+        "docs/getting-started.md",
+        "docs/guide/graph-construction.md",
+        "docs/reference/api.md",
+        "skeletonpaths/__init__.py",
+        "skeletonpaths/core.py",
+        "skeletonpaths/graph.py",
+        "skeletonpaths/hypotheses.py",
+        "skeletonpaths/model.py",
+        "tests/test_junction_regions.py",
+        "tests/test_multistroke.py",
+        "tests/test_stroke_search_limits.py"
+      ],
+      "sha": "790bf668135724f8036b336f6c975a00dbc1c69c",
+      "short_sha": "790bf66",
+      "source_ref": "git:790bf668135724f8036b336f6c975a00dbc1c69c"
+    }
+  ],
+  "git_base_ref": "c38998cab6c23aaa8d01a533790d713de5464277",
+  "git_base_sha": "c38998cab6c23aaa8d01a533790d713de5464277",
+  "git_head_ref": "790bf668135724f8036b336f6c975a00dbc1c69c",
+  "git_head_sha": "790bf668135724f8036b336f6c975a00dbc1c69c",
+  "include_merges": "nontrivial",
+  "object_type": "git_evidence_manifest",
+  "release_version": "v0.1.6",
+  "schema_version": 1
+}
