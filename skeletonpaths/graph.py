@@ -324,6 +324,197 @@ def _trace_graph_edges(
     return edges, ports
 
 
+def _node_specs_from_regions(
+    region_supports: list[set[Pixel]],
+    adjacency: dict[Pixel, tuple[Pixel, ...]],
+    components: list[set[Pixel]],
+    degrees: dict[Pixel, int],
+    radius_map: np.ndarray | None,
+    confidence_map: np.ndarray,
+    options: JunctionRegionOptions,
+) -> list[tuple[Pixel, set[Pixel], bool, float, float]]:
+    region_specs = []
+    for support in region_supports:
+        representative, region_radius = _region_representative(
+            support, radius_map, options.representative
+        )
+        region_confidence = float(
+            np.mean([confidence_map[row, column] for row, column in sorted(support)])
+        )
+        region_specs.append((representative, support, True, region_radius, region_confidence))
+
+    absorbed = set().union(*(support for support in region_supports)) if region_supports else set()
+    node_specs = list(region_specs)
+    for pixel, degree in sorted(degrees.items()):
+        if degree != 2 and pixel not in absorbed:
+            node_specs.append((pixel, {pixel}, False, 0.0, 0.0))
+
+    for component in components:
+        if not any(pixel in absorbed or degrees[pixel] != 2 for pixel in component):
+            anchor = min(component)
+            node_specs.append((anchor, {anchor}, False, 0.0, 0.0))
+
+    node_specs.sort(key=lambda item: (item[0], not item[2]))
+    return node_specs
+
+
+def _assemble_skeleton_graph(
+    node_specs: list[tuple[Pixel, set[Pixel], bool, float, float]],
+    adjacency: dict[Pixel, tuple[Pixel, ...]],
+    radius_map: np.ndarray | None,
+    confidence_map: np.ndarray,
+    raw_seed_count: int,
+    provisional_junction_count: int,
+) -> SkeletonGraph:
+    node_pixels = [spec[0] for spec in node_specs]
+    node_supports = [spec[1] for spec in node_specs]
+    edges, ports = _trace_graph_edges(
+        node_supports, node_pixels, adjacency, radius_map, confidence_map
+    )
+    nodes = []
+    junction_regions = []
+    for node_id, (pixel, support, is_region, region_radius, region_confidence) in enumerate(
+        node_specs
+    ):
+        if is_region:
+            radius_value = region_radius
+            confidence_value = region_confidence
+            port_count = len(ports[node_id])
+            junction_regions.append(
+                JunctionRegion(
+                    node_id=node_id,
+                    xy=(float(pixel[1]), float(pixel[0])),
+                    radius_px=radius_value,
+                    support_pixels=tuple(sorted(support)),
+                    port_count=port_count,
+                    confidence=confidence_value,
+                )
+            )
+        else:
+            radius_value, confidence_value = _radius_and_confidence(
+                pixel, radius_map, confidence_map
+            )
+            port_count = len(ports[node_id])
+        nodes.append(
+            SkeletonNode(
+                id=node_id,
+                xy=(float(pixel[1]), float(pixel[0])),
+                degree=port_count,
+                radius_px=radius_value,
+                confidence=confidence_value,
+            )
+        )
+
+    return SkeletonGraph(
+        tuple(nodes),
+        tuple(edges),
+        tuple(junction_regions),
+        raw_junction_seed_count=raw_seed_count,
+        provisional_junction_count=provisional_junction_count,
+    )
+
+
+def _edge_port_tangent(edge: SkeletonEdge, side: str) -> np.ndarray:
+    vector = edge.xy[1] - edge.xy[0] if side == "a" else edge.xy[-2] - edge.xy[-1]
+    length = float(np.linalg.norm(vector))
+    return vector / length if length > 1e-12 else np.zeros(2, dtype=float)
+
+
+def _is_independent_crossing(graph: SkeletonGraph, node_id: int) -> bool:
+    tangents = []
+    for edge in graph.edges:
+        if edge.a == node_id:
+            tangents.append(_edge_port_tangent(edge, "a"))
+        if edge.b == node_id:
+            tangents.append(_edge_port_tangent(edge, "b"))
+    if len(tangents) < 4 or len(tangents) % 2:
+        return False
+
+    def pairable(remaining: tuple[int, ...]) -> bool:
+        if not remaining:
+            return True
+        first = remaining[0]
+        for index, second in enumerate(remaining[1:], start=1):
+            if float(np.dot(tangents[first], tangents[second])) <= -0.85 and pairable(
+                remaining[1:index] + remaining[index + 1 :]
+            ):
+                return True
+        return False
+
+    return pairable(tuple(range(len(tangents))))
+
+
+def _semantic_junction_cleanup(
+    graph: SkeletonGraph,
+    region_supports: list[set[Pixel]],
+    adjacency: dict[Pixel, tuple[Pixel, ...]],
+) -> list[set[Pixel]]:
+    regions = {region.node_id: region for region in graph.junction_regions}
+    nodes = {node.id: node for node in graph.nodes}
+    candidates: dict[tuple[int, int], tuple[tuple[float, float, float, int], int]] = {}
+    for edge_id, edge in enumerate(graph.edges):
+        if edge.a == edge.b or edge.a not in regions or edge.b not in regions:
+            continue
+        first, second = sorted((edge.a, edge.b))
+        if _is_independent_crossing(graph, first) or _is_independent_crossing(graph, second):
+            continue
+
+        local_radius = max(
+            edge.mean_radius_px,
+            (regions[first].radius_px + regions[second].radius_px) / 2.0,
+        )
+        if local_radius <= 0.0:
+            continue
+        normalized_length = edge.length_px / local_radius
+        if normalized_length > 4.0:
+            continue
+        confidence = min(
+            edge.confidence,
+            regions[first].confidence,
+            regions[second].confidence,
+        )
+        if confidence < 0.5:
+            continue
+        if float(np.dot(_edge_port_tangent(edge, "a"), _edge_port_tangent(edge, "b"))) > -0.5:
+            continue
+        if nodes[first].degree + nodes[second].degree - 2 < 3:
+            continue
+
+        key = (normalized_length, edge.length_px, -confidence, edge_id)
+        previous = candidates.get((first, second))
+        if previous is None or key < previous[0]:
+            candidates[first, second] = (key, edge_id)
+
+    if not candidates:
+        return region_supports
+
+    parent = {node_id: node_id for node_id in regions}
+    supports = {node_id: set(region.support_pixels) for node_id, region in regions.items()}
+
+    def find(node_id: int) -> int:
+        while parent[node_id] != node_id:
+            parent[node_id] = parent[parent[node_id]]
+            node_id = parent[node_id]
+        return node_id
+
+    ordered_candidates = sorted((key, pair, edge_id) for pair, (key, edge_id) in candidates.items())
+    for _, (first, second), edge_id in ordered_candidates:
+        first_root, second_root = find(first), find(second)
+        if first_root == second_root:
+            continue
+        root, child = sorted((first_root, second_root))
+        edge = graph.edges[edge_id]
+        corridor = {
+            (int(round(y)), int(round(x)))
+            for x, y in edge.xy
+            if (int(round(y)), int(round(x))) in adjacency
+        }
+        supports[root] = supports.pop(root) | supports.pop(child) | corridor
+        parent[child] = root
+
+    return [supports[root] for root in sorted(supports)]
+
+
 def build_skeleton_graph(
     observed_ink: ArrayLike,
     *,
@@ -411,65 +602,45 @@ def build_skeleton_graph(
     region_supports = _junction_region_supports(
         raw_seeds, adjacency, degrees, radius, junction_options
     )
-    region_specs = []
-    for support in region_supports:
-        representative, region_radius = _region_representative(
-            support, radius, junction_options.representative
-        )
-        region_confidence = float(
-            np.mean([confidence_map[row, column] for row, column in sorted(support)])
-        )
-        region_specs.append((representative, support, True, region_radius, region_confidence))
-
-    absorbed = set().union(*(support for support in region_supports)) if region_supports else set()
-    node_specs = list(region_specs)
-    for pixel, degree in sorted(degrees.items()):
-        if degree != 2 and pixel not in absorbed:
-            node_specs.append((pixel, {pixel}, False, 0.0, 0.0))
-
-    for component in components:
-        if not any(pixel in absorbed or degrees[pixel] != 2 for pixel in component):
-            anchor = min(component)
-            node_specs.append((anchor, {anchor}, False, 0.0, 0.0))
-
-    node_specs.sort(key=lambda item: (item[0], not item[2]))
-    node_pixels = [spec[0] for spec in node_specs]
-    node_supports = [spec[1] for spec in node_specs]
-    edges, ports = _trace_graph_edges(node_supports, node_pixels, adjacency, radius, confidence_map)
-    nodes = []
-    junction_regions = []
-    for node_id, (pixel, support, is_region, region_radius, region_confidence) in enumerate(
-        node_specs
-    ):
-        if is_region:
-            radius_value = region_radius
-            confidence_value = region_confidence
-            port_count = len(ports[node_id])
-            junction_regions.append(
-                JunctionRegion(
-                    node_id=node_id,
-                    xy=(float(pixel[1]), float(pixel[0])),
-                    radius_px=radius_value,
-                    support_pixels=tuple(sorted(support)),
-                    port_count=port_count,
-                    confidence=confidence_value,
-                )
-            )
-        else:
-            radius_value, confidence_value = _radius_and_confidence(pixel, radius, confidence_map)
-            port_count = len(ports[node_id])
-        nodes.append(
-            SkeletonNode(
-                id=node_id,
-                xy=(float(pixel[1]), float(pixel[0])),
-                degree=port_count,
-                radius_px=radius_value,
-                confidence=confidence_value,
-            )
-        )
-
-    return SkeletonGraph(
-        tuple(nodes), tuple(edges), tuple(junction_regions), raw_junction_seed_count=len(raw_seeds)
+    provisional_junction_count = len(region_supports) if region_supports else len(raw_seeds)
+    provisional_specs = _node_specs_from_regions(
+        region_supports,
+        adjacency,
+        components,
+        degrees,
+        radius,
+        confidence_map,
+        junction_options,
+    )
+    provisional_graph = _assemble_skeleton_graph(
+        provisional_specs,
+        adjacency,
+        radius,
+        confidence_map,
+        len(raw_seeds),
+        provisional_junction_count,
+    )
+    semantic_supports = (
+        _semantic_junction_cleanup(provisional_graph, region_supports, adjacency)
+        if junction_options.enabled and region_supports
+        else region_supports
+    )
+    final_specs = _node_specs_from_regions(
+        semantic_supports,
+        adjacency,
+        components,
+        degrees,
+        radius,
+        confidence_map,
+        junction_options,
+    )
+    return _assemble_skeleton_graph(
+        final_specs,
+        adjacency,
+        radius,
+        confidence_map,
+        len(raw_seeds),
+        provisional_junction_count,
     )
 
 

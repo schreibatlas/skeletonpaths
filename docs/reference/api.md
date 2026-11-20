@@ -41,6 +41,13 @@ The package root, `skeletonpaths`, is the supported import surface. The explicit
 ```
 
 
+```{eval-rst}
+.. autofunction:: skeletonpaths.orientation_variants
+```
+
+`diversity="stroke-count"` retains full-coverage stroke-count families before filling the result limit. It does not alter candidate scores. `orientation_variants()` returns the supplied hypothesis and its globally reversed traversal; the returned `orientation_relation` distinguishes the two without asserting historical direction.
+
+
 ## Route enumeration, ranking, and selection
 ## Subpixel centerline geometry
 

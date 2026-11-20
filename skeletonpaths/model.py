@@ -224,6 +224,7 @@ class SkeletonGraph:
     edges: tuple[SkeletonEdge, ...]
     junction_regions: tuple[JunctionRegion, ...] = ()
     raw_junction_seed_count: int = 0
+    provisional_junction_count: int | None = None
 
     def __post_init__(self) -> None:
         nodes = tuple(self.nodes)
@@ -255,8 +256,24 @@ class SkeletonGraph:
             or raw_count < 0
         ):
             raise ValueError("raw junction seed count must be a nonnegative integer")
+        provisional_count = self.provisional_junction_count
+        semantic_count = (
+            len(junction_regions) if junction_regions else sum(node.degree > 2 for node in nodes)
+        )
+        if provisional_count is None:
+            provisional_count = semantic_count
+        if (
+            isinstance(provisional_count, bool)
+            or not isinstance(provisional_count, (int, np.integer))
+            or provisional_count < semantic_count
+        ):
+            raise ValueError(
+                "provisional junction count must be an integer "
+                "at least as large as the semantic count"
+            )
         object.__setattr__(self, "junction_regions", junction_regions)
         object.__setattr__(self, "raw_junction_seed_count", int(raw_count))
+        object.__setattr__(self, "provisional_junction_count", int(provisional_count))
         object.__setattr__(self, "nodes", nodes)
         object.__setattr__(self, "edges", edges)
 
@@ -303,6 +320,11 @@ class SkeletonGraph:
             if self.junction_regions
             else sum(node.degree > 2 for node in self.nodes)
         )
+
+    @property
+    def semantic_junction_count(self) -> int:
+        """Number of junction regions after semantic cleanup."""
+        return self.junction_count
 
 
 @dataclass(frozen=True)
@@ -419,6 +441,16 @@ class SkeletonAnalysis(SkeletonImage):
     def raw_junction_seed_count(self) -> int:
         """Number of raw high-degree skeleton pixels before region contraction."""
         return self.graph.raw_junction_seed_count
+
+    @property
+    def provisional_junction_count(self) -> int:
+        """Number of junction regions before semantic cleanup."""
+        return self.graph.provisional_junction_count
+
+    @property
+    def semantic_junction_count(self) -> int:
+        """Number of junction regions after semantic cleanup."""
+        return self.graph.semantic_junction_count
 
     @property
     def component_count(self) -> int:
@@ -832,6 +864,7 @@ class StrokeHypothesis:
     orientation_ambiguous_strokes: tuple[bool, ...] = ()
     repeat_required_by_hypothesis: bool = False
     truncated: bool = False
+    orientation_relation: Literal["as-supplied", "global-reversal"] = "as-supplied"
 
     def __post_init__(self) -> None:
         walks = tuple(self.walks)
@@ -874,6 +907,8 @@ class StrokeHypothesis:
             or any(not isinstance(value, bool) for value in orientation)
         ):
             raise ValueError("per-stroke orientation ambiguity must match the walks")
+        if self.orientation_relation not in {"as-supplied", "global-reversal"}:
+            raise ValueError("orientation relation must be 'as-supplied' or 'global-reversal'")
         object.__setattr__(self, "walks", walks)
         object.__setattr__(self, "covered_edge_ids", frozenset(int(edge) for edge in covered))
         object.__setattr__(self, "uncovered_edge_ids", frozenset(int(edge) for edge in uncovered))

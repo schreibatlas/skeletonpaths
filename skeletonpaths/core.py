@@ -4,6 +4,7 @@ from .graph import build_skeleton_graph, graph_from_skeleton, prune_spurs
 from .hypotheses import (
     DEFAULT_STROKE_SEARCH_LIMITS,
     DEFAULT_STROKE_SEARCH_POLICY,
+    orientation_variants,
     rank_covering_walks,
     stroke_hypotheses_from_analysis,
 )
@@ -95,6 +96,7 @@ __all__ = [
     "graph_from_skeleton",
     "prepare_topology_paths",
     "prune_spurs",
+    "orientation_variants",
     "rank_covering_walks",
     "rank_paths",
     "rank_topology_paths",

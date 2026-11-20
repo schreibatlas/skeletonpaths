@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Sequence
 from dataclasses import replace
+from typing import Literal
 
 import numpy as np
 from numpy.typing import ArrayLike
@@ -505,6 +506,54 @@ def _signature(hypothesis: StrokeHypothesis) -> tuple[object, ...]:
     return routes, pairings
 
 
+def _stroke_count_diverse_subset(
+    ranked: list[StrokeHypothesis], limit: int
+) -> list[StrokeHypothesis]:
+    best_by_stroke_count = {}
+    for hypothesis in ranked:
+        if not hypothesis.uncovered_edge_ids:
+            best_by_stroke_count.setdefault(hypothesis.stroke_count, hypothesis)
+    if not best_by_stroke_count:
+        return ranked[:limit]
+
+    minimum_stroke_count = min(best_by_stroke_count)
+    minimum_candidate = best_by_stroke_count[minimum_stroke_count]
+    family_signatures = {_signature(hypothesis) for hypothesis in best_by_stroke_count.values()}
+    selected_signatures = {_signature(minimum_candidate)}
+    for hypothesis in ranked:
+        signature = _signature(hypothesis)
+        if signature in family_signatures and signature not in selected_signatures:
+            if len(selected_signatures) == limit:
+                break
+            selected_signatures.add(signature)
+    for hypothesis in ranked:
+        if len(selected_signatures) == limit:
+            break
+        selected_signatures.add(_signature(hypothesis))
+    return [hypothesis for hypothesis in ranked if _signature(hypothesis) in selected_signatures]
+
+
+def orientation_variants(
+    hypothesis: StrokeHypothesis,
+) -> tuple[StrokeHypothesis, StrokeHypothesis]:
+    """Return the supplied hypothesis and its global reversal.
+
+    The returned orientation relation is relative to the supplied hypothesis. A
+    global reversal reverses the walk sequence and every walk without changing
+    score, coverage, or other traversal evidence.
+    """
+    if not isinstance(hypothesis, StrokeHypothesis):
+        raise TypeError("hypothesis must be a StrokeHypothesis")
+    supplied = replace(hypothesis, orientation_relation="as-supplied")
+    reversed_hypothesis = replace(
+        supplied,
+        walks=tuple(walk.reversed() for walk in reversed(supplied.walks)),
+        orientation_ambiguous_strokes=tuple(reversed(supplied.orientation_ambiguous_strokes)),
+        orientation_relation="global-reversal",
+    )
+    return supplied, reversed_hypothesis
+
+
 def rank_covering_walks(
     graph: SkeletonGraph,
     *,
@@ -514,6 +563,7 @@ def rank_covering_walks(
     limits: StrokeSearchLimits | None = None,
     limit: int = 5,
     policy: StrokeSearchPolicy = DEFAULT_STROKE_SEARCH_POLICY,
+    diversity: Literal["none", "stroke-count"] = "none",
 ) -> tuple[StrokeHypothesis, ...]:
     """Rank bounded multi-walk explanations of every edge in a skeleton graph.
 
@@ -532,6 +582,8 @@ def rank_covering_walks(
         raise TypeError("policy must be a StrokeSearchPolicy")
     if isinstance(limit, bool) or not isinstance(limit, (int, np.integer)) or limit < 1:
         raise ValueError("limit must be a positive integer")
+    if diversity not in ("none", "stroke-count"):
+        raise ValueError("diversity must be 'none' or 'stroke-count'")
     if expected_strokes is not None and (
         isinstance(expected_strokes, bool)
         or not isinstance(expected_strokes, (int, np.integer))
@@ -617,6 +669,8 @@ def rank_covering_walks(
         )
         marked.append(replace(hypothesis, route_ambiguous=ambiguous))
     is_truncated = len(marked) > int(limit)
+    if diversity == "stroke-count":
+        marked = _stroke_count_diverse_subset(marked, int(limit))
     return tuple(replace(item, truncated=is_truncated) for item in marked[: int(limit)])
 
 
@@ -629,6 +683,7 @@ def stroke_hypotheses_from_analysis(
     limits: StrokeSearchLimits | None = None,
     limit: int = 5,
     policy: StrokeSearchPolicy = DEFAULT_STROKE_SEARCH_POLICY,
+    diversity: Literal["none", "stroke-count"] = "none",
 ) -> tuple[StrokeHypothesis, ...]:
     """Search the graph in a ``SkeletonAnalysis`` result."""
     if not isinstance(analysis, SkeletonAnalysis):
@@ -641,4 +696,5 @@ def stroke_hypotheses_from_analysis(
         limits=limits,
         limit=limit,
         policy=policy,
+        diversity=diversity,
     )

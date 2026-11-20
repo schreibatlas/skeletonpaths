@@ -99,13 +99,16 @@ See {doc}`guide/graph-construction` for validation, dependency, and propagation 
 
 ## Rank multi-stroke hypotheses
 
-`rank_covering_walks()` returns several bounded explanations of the graph. `stroke_hypotheses_from_analysis()` starts from mask analysis and includes connected-component alternatives. Scores, repeated edges, lifts, branch pairings, and ambiguity remain evidence about hypotheses, not observations of pen history.
+`rank_covering_walks()` returns bounded ranked traversal candidates from graph topology. `stroke_hypotheses_from_analysis()` starts from mask analysis and includes connected-component alternatives. Scores, repeated edges, lifts, branch pairings, and ambiguity describe candidate evidence, not observed pen history. Pass `diversity="stroke-count"` to retain the best full-coverage candidate per stroke-count family, including the minimum-stroke family, before filling remaining slots by global rank. The default `"none"` preserves legacy ranking, and diversity does not change scores.
 
 ```{literalinclude} ../examples/11_stroke_hypotheses.py
 :language: python
 ```
 
 Each result reports separate coverage, repeat, turning, junction, lift, guide, and cycle score dimensions. A `truncated` flag identifies when the caller-requested result limit omitted lower-ranked alternatives. Search-limit exceptions include the configured bound, observed value, and search stage.
+
+
+Use {func}`skeletonpaths.orientation_variants` to inspect both the supplied traversal and its global reversal. The reversal reverses the walk sequence and each walk, and labels the relation as `"global-reversal"`. This exposes an alternative; it does not resolve `orientation_ambiguous` or identify a historical pen start.
 
 ## Inspect a selection
 

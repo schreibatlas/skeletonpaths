@@ -40,6 +40,7 @@ Orthogonal foreground neighbors connect. A diagonal pair connects only when neit
 - Degree-one endpoints remain separate graph nodes and are never absorbed into a junction region.
 - Pixels with raster degree greater than two are raw junction seeds, not automatically separate semantic graph nodes.
 - Nearby seeds are contracted into bounded junction regions using geodesic skeleton neighborhoods scaled by local ink radius from the source mask or supplied map. Without a radius map, pre-thinned input contracts only directly or near-adjacent seeds conservatively.
+- A semantic cleanup stage examines provisional junctions joined by short graph corridors. It uses connector length relative to local radius, port tangent continuity, confidence, and port-count/crossing evidence, while preserving endpoints and independent crossings. It does not globally increase the initial merge radius.
 - Each region has one representative node. Its graph degree is the number of boundary ports, so a self-edge contributes two ports.
 - An all-degree-two connected component receives a deterministic cycle anchor. Degree-two chains outside regions become graph edges.
 - Edge length is the assembled polyline length in pixels; graph-local edge IDs are implementation identifiers, not stable across topology-model upgrades.
@@ -81,10 +82,9 @@ The mask and confidence example is maintained in `examples/` and included here w
 ```
 
 ## Graph diagnostics
+{class}`skeletonpaths.SkeletonGraph` exposes graph-level `component_count`, `cycle_count`, `endpoint_count`, `junction_count`, `raw_junction_seed_count`, `provisional_junction_count`, and `semantic_junction_count`. `junction_count` is the semantic junction count. The graph cycle diagnostic is the cyclomatic count `max(0, |E| - |V| + component_count)`. It describes the whole graph, not a route. See {doc}`path-selection` for route-level cycle constraints.
 
-{class}`skeletonpaths.SkeletonGraph` exposes graph-level `component_count`, `cycle_count`, `endpoint_count`, and `junction_count`. The graph cycle diagnostic is the cyclomatic count `max(0, |E| - |V| + component_count)`. It describes the whole graph, not a route. See {doc}`path-selection` for route-level cycle constraints.
 
-
-`junction_count` counts semantic regions, not raw high-degree skeleton pixels or how often a walk encounters a region. `SkeletonGraph.raw_junction_seed_count` and `SkeletonAnalysis.raw_junction_seed_count` are engineering diagnostics. `SkeletonAnalysis.junction_regions` exposes immutable `JunctionRegion` records with representative center, radius, absorbed support pixels, port count, and confidence. The representative node's degree equals its port count; a self-edge contributes two ports, while a traversal may visit the same semantic region more than once.
+`raw_junction_seed_count` counts raw high-degree skeleton pixels. `provisional_junction_count` counts regions after the existing radius-aware discovery stage, before semantic cleanup. `semantic_junction_count` (also `junction_count`) counts final regions. `SkeletonAnalysis` exposes the same diagnostics and its immutable `JunctionRegion` records include representative center, radius, absorbed support pixels, port count, and confidence. The representative node's degree equals its port count; a self-edge contributes two ports, while a traversal may visit the same semantic region more than once.
 
 An empty skeleton is valid input and produces an empty graph.

@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
 from scipy.ndimage import binary_dilation
+from skimage.draw import disk as draw_disk
 from skimage.draw import line
 from skimage.morphology import disk
 
@@ -48,6 +49,37 @@ def _e_like_mask(scale, stroke_width, contact_gap, rotation=0):
     return np.rot90(mask, rotation)
 
 
+def _realistic_e_contact_mask(scale=1, rotation=0):
+    mask = np.zeros((120 * scale, 130 * scale), dtype=bool)
+    baseline = 76 * scale
+
+    def draw_variable_stroke(points, radii):
+        for (x, y), radius in zip(points, radii, strict=True):
+            rows, columns = draw_disk((y, x), radius, shape=mask.shape)
+            mask[rows, columns] = True
+
+    baseline_x = np.arange(8 * scale, 111 * scale)
+    draw_variable_stroke(
+        np.column_stack((baseline_x, np.full_like(baseline_x, baseline))),
+        np.linspace(3 * scale, 4 * scale, len(baseline_x)),
+    )
+
+    gap = 16 * scale
+    start = np.asarray((40 * scale, baseline), dtype=float)
+    control_one = np.asarray((40 * scale + 0.28 * gap, baseline))
+    control_two = np.asarray((40 * scale + 0.72 * gap, baseline - 42 * scale))
+    end = np.asarray((40 * scale + gap, baseline), dtype=float)
+    parameter = np.linspace(0.0, 1.0, 200 * scale)
+    points = (
+        ((1.0 - parameter) ** 3)[:, None] * start
+        + (3.0 * (1.0 - parameter) ** 2 * parameter)[:, None] * control_one
+        + (3.0 * (1.0 - parameter) * parameter**2)[:, None] * control_two
+        + (parameter**3)[:, None] * end
+    )
+    draw_variable_stroke(points, np.linspace(4 * scale, 2.25 * scale, len(points)))
+    return np.rot90(mask, rotation)
+
+
 @pytest.mark.parametrize(
     ("scale", "stroke_width", "contact_gap", "rotation"),
     (
@@ -85,6 +117,66 @@ def test_e_like_loop_contracts_to_one_junction_and_remains_coverable(
     )
 
 
+@pytest.mark.parametrize(("scale", "rotation"), ((1, 0), (2, 0), (1, 1), (1, 2), (1, 3)))
+def test_realistic_e_contact_does_not_create_spurious_second_semantic_junction(scale, rotation):
+    analysis = analyze_mask(_realistic_e_contact_mask(scale, rotation))
+    graph = analysis.graph
+
+    assert graph.endpoint_count == 2
+    assert graph.junction_count == 1
+    assert graph.semantic_junction_count == 1
+    assert graph.cycle_count == 1
+    assert graph.raw_junction_seed_count >= 2
+    assert graph.provisional_junction_count >= 2
+    assert analysis.provisional_junction_count == graph.provisional_junction_count
+    assert analysis.semantic_junction_count == graph.semantic_junction_count
+
+
+def test_semantic_cleanup_is_scale_stable():
+    graphs = [analyze_mask(_realistic_e_contact_mask(scale=scale)).graph for scale in (1, 2)]
+
+    assert [
+        (graph.endpoint_count, graph.junction_count, graph.cycle_count) for graph in graphs
+    ] == [
+        (2, 1, 1),
+        (2, 1, 1),
+    ]
+
+
+def test_semantic_cleanup_is_rotation_stable():
+    graphs = [
+        analyze_mask(_realistic_e_contact_mask(rotation=rotation)).graph for rotation in range(4)
+    ]
+
+    assert [
+        (graph.endpoint_count, graph.junction_count, graph.cycle_count) for graph in graphs
+    ] == [
+        (2, 1, 1),
+    ] * 4
+
+
+def test_semantic_cleanup_diagnostics_are_deterministic():
+    mask = _realistic_e_contact_mask()
+    first = analyze_mask(mask).graph
+    second = analyze_mask(mask).graph
+
+    assert (
+        first.raw_junction_seed_count,
+        first.provisional_junction_count,
+        first.semantic_junction_count,
+    ) == (
+        second.raw_junction_seed_count,
+        second.provisional_junction_count,
+        second.semantic_junction_count,
+    )
+    assert [(node.xy, node.degree) for node in first.nodes] == [
+        (node.xy, node.degree) for node in second.nodes
+    ]
+    assert [(edge.a, edge.b, edge.xy.tolist()) for edge in first.edges] == [
+        (edge.a, edge.b, edge.xy.tolist()) for edge in second.edges
+    ]
+
+
 def test_junction_region_radius_tracks_stroke_width_and_scale():
     thin = analyze_mask(_e_like_mask(1, 3, 4)).junction_regions[0].radius_px
     wider = analyze_mask(_e_like_mask(1, 5, 6)).junction_regions[0].radius_px
@@ -120,7 +212,7 @@ def test_diagonal_x_crossing_has_one_semantic_junction():
     assert graph.junction_regions[0].port_count == 4
 
 
-def test_radius_adaptive_regions_keep_separated_crossings_distinct():
+def test_semantic_cleanup_preserves_two_distinct_nearby_crossings():
     skeleton = np.zeros((15, 19), dtype=bool)
     skeleton[7, 1:18] = True
     skeleton[2:13, 5] = True
@@ -135,7 +227,7 @@ def test_radius_adaptive_regions_keep_separated_crossings_distinct():
     assert [region.port_count for region in graph.junction_regions] == [4, 4]
 
 
-def test_nearby_endpoint_is_not_absorbed_into_junction_region():
+def test_semantic_cleanup_never_absorbs_endpoint():
     skeleton = np.zeros((12, 15), dtype=bool)
     skeleton[7, 2:13] = True
     skeleton[3:8, 7] = True

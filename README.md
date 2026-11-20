@@ -59,7 +59,7 @@ The Sphinx guides and API reference explain graph construction, route selection,
 
 1. Supply a two-dimensional binary mask or already-thinned skeleton. Boolean arrays and finite numeric arrays containing only `0` and `1` are accepted. NaN, infinity, and other numeric values are rejected.
 2. `graph_from_mask()` optionally removes small components, derives radius values from the source mask with a Euclidean distance transform when no radius map is supplied, and skeletonizes the remaining mask. `graph_from_skeleton()` skips skeletonization and defaults radius values to zero when no radius map is supplied.
-3. Bridge-aware pixel adjacency is compressed into semantic graph nodes and edges. Endpoints remain distinct; raw degree-greater-than-two pixels are contracted into bounded junction regions using local stroke radius when available. A degree-two-only component receives a deterministic cycle anchor. Junction node degree is its boundary-port count, and degree-two chains become graph edges. Pass `junction_options=JunctionRegionOptions(...)` to configure contraction. Short spurs are preserved unless a positive pruning threshold is set.
+3. Bridge-aware pixel adjacency is compressed into provisional junction regions and graph edges. A semantic cleanup stage considers short graph corridors, normalized local radius, port tangents, confidence, and crossing/endpoint protection instead of globally increasing the merge radius. The graph exposes raw, provisional, and semantic junction counts. A degree-two-only component receives a deterministic cycle anchor; endpoints remain distinct and self-edges count two ports.
 4. Use `rank_paths()` and `select_path()` for simple route selection. Use `rank_covering_walks()` for bounded multi-walk hypotheses, including explicit repeats, junction pairing alternatives, and ambiguity evidence.
 5. Pass candidate `xy` geometry and optional guide paths to PlanarCurve-backed scoring. Geometry and orientation help rank hypotheses but do not establish historical pen behavior.
 
@@ -70,6 +70,9 @@ Input arrays use image indexing `[row, column]`. Public coordinates use `(x=colu
 Pixel adjacency uses orthogonal neighbors and permits a diagonal neighbor only when neither orthogonal bridge pixel is foreground. Raw junction seeds are skeleton pixels with degree greater than two. Nearby seeds are contracted into bounded semantic regions using geodesic neighborhoods scaled by the local ink radius; without a radius map, pre-thinned input contracts only directly or near-adjacent seeds conservatively. Endpoints are never absorbed. A region's representative node degree is the count of its boundary ports, with a self-edge contributing two ports. A single physical junction may be encountered multiple times in a traversal without becoming multiple graph nodes.
 
 
+A second semantic cleanup stage can consolidate provisional regions connected by a short, tangent-continuous graph corridor with local radius and confidence support. It does not merge clearly independent crossings, and endpoints remain protected. `raw_junction_seed_count`, `provisional_junction_count`, and `semantic_junction_count` distinguish the three topology stages; `junction_count` remains the semantic count.
+
+
 Graph edges represent undirected raster evidence. Their stored endpoint and edge order is deterministic for geometry assembly, not physical drawing order. `SkeletonPath` is a non-repeating route through part of a graph; `SkeletonWalk` is an ordered traversal that may repeat edges to cover a connected graph.
 
 `graph_from_mask()` uses eight-neighbor connected-component labeling when `min_component_area` is greater than zero. Components smaller than the requested area are removed before skeletonization. A supplied `radius` map must match the image shape and contain finite nonnegative values. A supplied `confidence` map must match the image shape and contain values between zero and one.
@@ -78,8 +81,8 @@ Graph edges represent undirected raster evidence. Their stored endpoint and edge
 
 The public models are frozen. Graph and path collections are tuples, graph and path coordinate arrays are read-only, and inventory mappings are immutable.
 
-- `SkeletonGraph` contains nodes, edges, and semantic `junction_regions`, with `component_count`, `cycle_count`, `endpoint_count`, `junction_count`, and `raw_junction_seed_count` diagnostics.
-- `SkeletonAnalysis` contains owned read-only mask, skeleton, radius, and confidence arrays, optional component labels, graph, semantic junction regions, and the raw junction-seed count.
+- `SkeletonGraph` contains nodes, edges, and semantic `junction_regions`, with `component_count`, `cycle_count`, `endpoint_count`, `junction_count`, `raw_junction_seed_count`, `provisional_junction_count`, and `semantic_junction_count` diagnostics.
+- `SkeletonAnalysis` contains owned read-only mask, skeleton, radius, and confidence arrays, optional component labels, graph, semantic junction regions, and raw, provisional, and semantic junction counts.
 - `JunctionRegion` reports one representative node, center, local radius, absorbed support pixels, boundary-port count, and aggregate confidence. `JunctionRegionOptions` controls bounded region contraction.
 - `SkeletonNode.degree` is semantic port degree for junctions. Self-edges count twice, once for each port.
 - `SkeletonNode` records its integer ID, `(x, y)` coordinate, degree, radius in pixels, and confidence.
@@ -92,7 +95,7 @@ The public models are frozen. Graph and path collections are tuples, graph and p
 - `TopologyPathInventory` stores enumerated routes by the requested path kinds for reuse during ranking.
 - `RouteStep` identifies one edge and its explicit `a-to-b` or `b-to-a` traversal direction.
 - `JunctionPairing` records generic tangent-ranked branch pairs and unpaired edges, not physical truth.
-- `StrokeHypothesis` contains walks, covered and uncovered edges, repeated-edge evidence, lift count, separate score dimensions, pairing candidates, and route, orientation, and component-order ambiguity.
+- `StrokeHypothesis` contains topology traversal candidates, covered and uncovered edges, repeated-edge evidence, lift count, separate score dimensions, pairing candidates, route/orientation/component-order ambiguity, and an `orientation_relation` label.
 - `StrokeSearchLimits` and `StrokeSearchPolicy` configure hard bounds and separate ranking penalties.
 
 
@@ -160,6 +163,11 @@ Each `StrokeHypothesisScore` preserves coverage error, uncovered length, repeat 
 
 A repeat is evidence about a hypothesis only. `repeat_required_by_hypothesis` never means that the source was observed to be retraced. Orientation flags and component ordering likewise describe ambiguity in candidate explanations, not recovered history. If the requested result `limit` omits lower-ranked candidates, each returned hypothesis sets `truncated=True`.
 
+
+`diversity="none"` preserves legacy global ranking. Opt into `diversity="stroke-count"` to retain the best full-coverage candidate for each stroke-count family, including the minimum-stroke candidate, before filling remaining slots by global rank. Scores and search limits are unchanged. This is candidate preservation, not a handwriting-semantic selection or a claim that any route is historically correct.
+
+`orientation_variants(hypothesis)` returns the supplied traversal candidate and its global reversal. The reversal reverses both walk order and each walk, and its `orientation_relation` is labeled `"global-reversal"`. Unresolved orientation remains ambiguous; neither ordering is a recovered pen start or historical trace.
+
 `StrokeSearchLimits` bounds each search stage. Defaults are:
 
 | Limit | Default | Bound |
@@ -181,7 +189,7 @@ The supported package-root exports are:
 
 - Constants: `DEFAULT_MAX_PATHS`, `DEFAULT_RANKING_POLICY`, `DEFAULT_SEARCH_LIMITS`, `DEFAULT_STROKE_SEARCH_LIMITS`, `DEFAULT_STROKE_SEARCH_POLICY`, and `__version__`.
 - Models and errors: `DisconnectedGraphError`, `JunctionPairing`, `JunctionPairingLimitError`, `JunctionRegion`, `JunctionRegionOptions`, `NoFeasiblePathError`, path scoring and limit types, `RouteStep`, `SkeletonAnalysis`, graph/image/path/walk models, `StrokeHypothesis`, `StrokeHypothesisScore`, `StrokeSearchLimitError`, `StrokeSearchLimits`, `StrokeSearchPolicy`, `TopologyPathInventory`, and `TopologyRoute`.
-- Graph, image, and hypothesis functions: `analyze_mask`, `build_skeleton_graph`, `covering_walk`, `graph_from_mask`, `graph_from_skeleton`, `prune_spurs`, `rank_covering_walks`, and `stroke_hypotheses_from_analysis`.
+- Graph, image, and hypothesis functions: `analyze_mask`, `build_skeleton_graph`, `covering_walk`, `graph_from_mask`, `graph_from_skeleton`, `prune_spurs`, `orientation_variants`, `rank_covering_walks`, and `stroke_hypotheses_from_analysis`.
 - Route functions: `prepare_topology_paths`, `rank_paths`, and `select_path`.
 
 `graph_from_skeleton()` is the lightweight entry point for pre-thinned images. `graph_from_mask()` uses the optional image dependencies. `build_skeleton_graph()` is the lower-level graph constructor and skeletonizes by default unless `already_skeleton=True`.

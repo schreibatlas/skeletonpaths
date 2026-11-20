@@ -68,3 +68,16 @@ def test_hypothesis_budget_and_walk_step_limits_are_hard_bounds():
     )
     with pytest.raises(StrokeSearchLimitError, match="max_walk_steps"):
         rank_covering_walks(graph, limits=StrokeSearchLimits(max_walk_steps=1))
+
+
+@pytest.mark.parametrize("diversity", ("none", "stroke-count"))
+def test_diversity_does_not_bypass_hypothesis_or_walk_step_limits(diversity):
+    with pytest.raises(StrokeSearchLimitError, match="max_hypotheses"):
+        rank_covering_walks(
+            _star_graph(), limits=StrokeSearchLimits(max_hypotheses=1), diversity=diversity
+        )
+
+    with pytest.raises(StrokeSearchLimitError, match="max_walk_steps"):
+        rank_covering_walks(
+            _star_graph(), limits=StrokeSearchLimits(max_walk_steps=1), diversity=diversity
+        )
