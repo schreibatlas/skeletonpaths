@@ -315,7 +315,6 @@ def _observe_edge(
     return observations
 
 
-
 def _nearest_valid(observations: _Observations, from_start: bool) -> int | None:
     indices = np.flatnonzero(observations.valid)
     if not len(indices):

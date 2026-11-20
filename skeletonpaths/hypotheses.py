@@ -76,7 +76,6 @@ def _incident_edges(graph: SkeletonGraph) -> dict[int, list[tuple[int, str]]]:
     return incident
 
 
-
 def _guide_arrays(guide_paths: Sequence[ArrayLike] | None) -> tuple[np.ndarray, ...]:
     if guide_paths is None:
         return ()
@@ -95,9 +94,7 @@ def _guide_arrays(guide_paths: Sequence[ArrayLike] | None) -> tuple[np.ndarray, 
     return tuple(guides)
 
 
-def _edge_outward_tangent(
-    graph: SkeletonGraph, port: tuple[int, str], node_id: int
-) -> np.ndarray:
+def _edge_outward_tangent(graph: SkeletonGraph, port: tuple[int, str], node_id: int) -> np.ndarray:
     edge_id, side = port
     edge = graph.edges[edge_id]
     tangent = unit_tangents(edge.xy)
@@ -106,7 +103,6 @@ def _edge_outward_tangent(
     if side == "b" and edge.b == node_id:
         return -tangent[-1]
     raise ValueError("junction port does not touch its node")
-
 
 
 def _guide_tangent_cost(
@@ -134,18 +130,14 @@ def _junction_options(
     states: list[int],
 ) -> tuple[tuple[JunctionPairing, ...], ...]:
     incident = _incident_edges(graph)
-    junctions = [
-        (node_id, ports) for node_id, ports in sorted(incident.items()) if len(ports) > 2
-    ]
+    junctions = [(node_id, ports) for node_id, ports in sorted(incident.items()) if len(ports) > 2]
     if not junctions:
         return ((),)
 
     pairing_count = [0]
     options_by_node = []
     for node_id, ports in junctions:
-        tangent_by_port = {
-            port: _edge_outward_tangent(graph, port, node_id) for port in ports
-        }
+        tangent_by_port = {port: _edge_outward_tangent(graph, port, node_id) for port in ports}
         candidates = []
 
         def enumerate_matchings(
@@ -227,7 +219,6 @@ def _junction_options(
     return tuple(combinations)
 
 
-
 def _transitions(
     graph: SkeletonGraph, pairings: tuple[JunctionPairing, ...]
 ) -> dict[tuple[int, tuple[int, str]], tuple[int, str]]:
@@ -244,14 +235,12 @@ def _transitions(
             ports = _incident_edges(graph)[pairing.node_id]
             port_by_edge = {port[0]: port for port in ports}
             port_pairs = tuple(
-                (port_by_edge[first], port_by_edge[second])
-                for first, second in pairing.pairs
+                (port_by_edge[first], port_by_edge[second]) for first, second in pairing.pairs
             )
         for first, second in port_pairs:
             transitions[pairing.node_id, first] = second
             transitions[pairing.node_id, second] = first
     return transitions
-
 
 
 def _walk_from_steps(
@@ -312,7 +301,6 @@ def _walk_from_steps(
         repeated_edge_count=len(edge_ids) - len(covered),
         length_px=float(sum(graph.edges[edge_id].length_px for edge_id in edge_ids)),
     )
-
 
 
 def _decompose(
@@ -382,8 +370,6 @@ def _single_walk_per_component(graph: SkeletonGraph) -> tuple[SkeletonWalk, ...]
             steps.append((edge_id, source_side))
         walks.append(_walk_from_steps(graph, tuple(steps)))
     return tuple(walks)
-
-
 
 
 def _orient_walk(

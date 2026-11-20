@@ -212,9 +212,8 @@ def _junction_region_supports(
                     continue
                 step = hypot(neighbor[0] - pixel[0], neighbor[1] - pixel[1])
                 next_distance = distance + step
-                if (
-                    next_distance > merge_radius
-                    or next_distance >= distances.get(neighbor, float("inf"))
+                if next_distance > merge_radius or next_distance >= distances.get(
+                    neighbor, float("inf")
                 ):
                     continue
                 distances[neighbor] = next_distance
@@ -264,9 +263,7 @@ def _trace_graph_edges(
     confidence_map: np.ndarray,
 ) -> tuple[list[SkeletonEdge], list[set[tuple[Pixel, Pixel]]]]:
     support_owner = {
-        pixel: node_id
-        for node_id, support in enumerate(node_supports)
-        for pixel in support
+        pixel: node_id for node_id, support in enumerate(node_supports) for pixel in support
     }
     ports: list[set[tuple[Pixel, Pixel]]] = [set() for _ in node_supports]
     for node_id, support in enumerate(node_supports):
@@ -438,10 +435,7 @@ def build_skeleton_graph(
     node_specs.sort(key=lambda item: (item[0], not item[2]))
     node_pixels = [spec[0] for spec in node_specs]
     node_supports = [spec[1] for spec in node_specs]
-    edges, ports = _trace_graph_edges(
-        node_supports, node_pixels, adjacency, radius, confidence_map
-    )
-
+    edges, ports = _trace_graph_edges(node_supports, node_pixels, adjacency, radius, confidence_map)
     nodes = []
     junction_regions = []
     for node_id, (pixel, support, is_region, region_radius, region_confidence) in enumerate(
@@ -462,9 +456,7 @@ def build_skeleton_graph(
                 )
             )
         else:
-            radius_value, confidence_value = _radius_and_confidence(
-                pixel, radius, confidence_map
-            )
+            radius_value, confidence_value = _radius_and_confidence(pixel, radius, confidence_map)
             port_count = len(ports[node_id])
         nodes.append(
             SkeletonNode(
@@ -479,6 +471,7 @@ def build_skeleton_graph(
     return SkeletonGraph(
         tuple(nodes), tuple(edges), tuple(junction_regions), raw_junction_seed_count=len(raw_seeds)
     )
+
 
 def graph_from_skeleton(
     skeleton: ArrayLike,

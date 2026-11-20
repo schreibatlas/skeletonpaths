@@ -29,7 +29,6 @@ def _draw_segments(segments, shape=(15, 19)):
     return skeleton
 
 
-
 def _e_like_mask(scale, stroke_width, contact_gap, rotation=0):
     mask = np.zeros((75 * scale, 75 * scale), dtype=bool)
     baseline = 38 * scale
@@ -47,7 +46,6 @@ def _e_like_mask(scale, stroke_width, contact_gap, rotation=0):
         mask[rows, columns] = True
     mask = binary_dilation(mask, structure=disk(stroke_width // 2))
     return np.rot90(mask, rotation)
-
 
 
 @pytest.mark.parametrize(
@@ -97,9 +95,7 @@ def test_junction_region_radius_tracks_stroke_width_and_scale():
 
 
 def test_adjacent_raw_junction_seeds_contract_to_one_region():
-    skeleton = _draw_segments(
-        [((4, 1), (4, 8)), ((1, 4), (4, 4)), ((4, 5), (7, 5))], shape=(9, 10)
-    )
+    skeleton = _draw_segments([((4, 1), (4, 8)), ((1, 4), (4, 4)), ((4, 5), (7, 5))], shape=(9, 10))
 
     graph = graph_from_skeleton(skeleton)
 
@@ -174,9 +170,7 @@ def test_pure_loop_keeps_one_cycle_anchor_without_a_junction_region():
 
 def test_junction_options_validate_and_can_disable_contraction():
     options = JunctionRegionOptions(enabled=False)
-    skeleton = _draw_segments(
-        [((4, 1), (4, 8)), ((1, 4), (4, 4)), ((4, 5), (7, 5))], shape=(9, 10)
-    )
+    skeleton = _draw_segments([((4, 1), (4, 8)), ((1, 4), (4, 4)), ((4, 5), (7, 5))], shape=(9, 10))
 
     graph = graph_from_skeleton(skeleton, junction_options=options)
 
@@ -186,7 +180,6 @@ def test_junction_options_validate_and_can_disable_contraction():
         JunctionRegionOptions(minimum_merge_radius_px=2.0, maximum_merge_radius_px=1.0)
     with pytest.raises(ValueError, match="representative"):
         JunctionRegionOptions(representative="unsupported")
-
 
 
 def _self_loop_junction_graph():
@@ -242,13 +235,10 @@ def test_self_loop_has_two_junction_ports_and_a_complete_one_walk_hypothesis():
     assert one_walks
     assert len(first) <= 32
     assert [
-        (hypothesis.walks[0].edge_ids, hypothesis.walks[0].edge_directions)
-        for hypothesis in first
+        (hypothesis.walks[0].edge_ids, hypothesis.walks[0].edge_directions) for hypothesis in first
     ] == [
-        (hypothesis.walks[0].edge_ids, hypothesis.walks[0].edge_directions)
-        for hypothesis in second
+        (hypothesis.walks[0].edge_ids, hypothesis.walks[0].edge_directions) for hypothesis in second
     ]
-
 
 
 def test_subpixel_junction_guard_is_adaptive_and_edge_length_capped():

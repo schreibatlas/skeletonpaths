@@ -93,6 +93,7 @@ class JunctionRegionOptions:
         if self.representative not in {"radius-weighted-medoid", "radius-weighted-centroid"}:
             raise ValueError("representative must select a supported radius-weighted method")
 
+
 DEFAULT_MAX_PATHS = 10_000
 
 
@@ -297,8 +298,10 @@ class SkeletonGraph:
     @property
     def junction_count(self) -> int:
         """Number of semantic junction regions, or high-degree nodes for a hand-built graph."""
-        return len(self.junction_regions) if self.junction_regions else sum(
-            node.degree > 2 for node in self.nodes
+        return (
+            len(self.junction_regions)
+            if self.junction_regions
+            else sum(node.degree > 2 for node in self.nodes)
         )
 
 
@@ -700,9 +703,7 @@ class JunctionPairing:
     pairs: tuple[tuple[int, int], ...]
     unpaired_edges: tuple[int, ...]
     tangent_cost: float
-    port_pairs: tuple[
-        tuple[tuple[int, Literal["a", "b"]], tuple[int, Literal["a", "b"]]], ...
-    ] = ()
+    port_pairs: tuple[tuple[tuple[int, Literal["a", "b"]], tuple[int, Literal["a", "b"]]], ...] = ()
     unpaired_ports: tuple[tuple[int, Literal["a", "b"]], ...] = ()
 
     def __post_init__(self) -> None:

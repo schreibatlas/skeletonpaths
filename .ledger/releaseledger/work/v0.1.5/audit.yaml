@@ -1,0 +1,42 @@
+schema_version: 1
+object_type: commit_audit_sheet
+versioning:
+  schema_version: 1
+  revision: 1
+release_version: v0.1.5
+git_base_ref: v0.1.4
+git_base_sha: b375e909074612e40d459750f73521817bedaab7
+git_head_ref: HEAD
+git_head_sha: 68e64dd7f63a4c67b70bd4f0d1b147fb72a016cc
+git_range: b375e909074612e40d459750f73521817bedaab7..68e64dd7f63a4c67b70bd4f0d1b147fb72a016cc
+commit_count: 1
+rows:
+- sha: 68e64dd7f63a4c67b70bd4f0d1b147fb72a016cc
+  source_ref: git:68e64dd7f63a4c67b70bd4f0d1b147fb72a016cc
+  short_sha: 68e64dd
+  changed_paths:
+  - README.md
+  - docs/getting-started.md
+  - docs/guide/graph-construction.md
+  - docs/reference/api.md
+  - docs/reference/behavior-contracts.md
+  - docs/subpixel-centerlines.md
+  - skeletonpaths/__init__.py
+  - skeletonpaths/graph.py
+  - skeletonpaths/hypotheses.py
+  - skeletonpaths/image.py
+  - skeletonpaths/model.py
+  - skeletonpaths/subpixel.py
+  - tests/test_junction_regions.py
+  - tests/test_skeletonpaths.py
+  stats:
+    files_changed: 14
+    insertions: 890
+    deletions: 147
+  inspected: false
+  inspected_paths: []
+  observed_behavior: ''
+  public_impact: unknown
+  decision: needs_review
+  stale: false
+  evidence_subject: 'feat: better junction detection'
