@@ -19,27 +19,27 @@ index e113694..5fe64ab 100644
 --- a/README.md
 +++ b/README.md
 @@ -59,7 +59,7 @@ The Sphinx guides and API reference explain graph construction, route selection,
- 
+
  1. Supply a two-dimensional binary mask or already-thinned skeleton. Boolean arrays and finite numeric arrays containing only `0` and `1` are accepted. NaN, infinity, and other numeric values are rejected.
  2. `graph_from_mask()` optionally removes small components, derives radius values from the source mask with a Euclidean distance transform when no radius map is supplied, and skeletonizes the remaining mask. `graph_from_skeleton()` skips skeletonization and defaults radius values to zero when no radius map is supplied.
 -3. Raster pixels are converted to an undirected topology graph. Pixels whose degree differs from two remain graph nodes. An all-degree-two component receives a deterministic representative node. Degree-two chains become graph edges. Short spurs are preserved unless `min_spur_length` or `min_spur_length_px` is set above zero.
 +3. Bridge-aware pixel adjacency is compressed into semantic graph nodes and edges. Endpoints remain distinct; raw degree-greater-than-two pixels are contracted into bounded junction regions using local stroke radius when available. A degree-two-only component receives a deterministic cycle anchor. Junction node degree is its boundary-port count, and degree-two chains become graph edges. Pass `junction_options=JunctionRegionOptions(...)` to configure contraction. Short spurs are preserved unless a positive pruning threshold is set.
  4. Use `rank_paths()` and `select_path()` for simple route selection. Use `rank_covering_walks()` for bounded multi-walk hypotheses, including explicit repeats, junction pairing alternatives, and ambiguity evidence.
  5. Pass candidate `xy` geometry and optional guide paths to PlanarCurve-backed scoring. Geometry and orientation help rank hypotheses but do not establish historical pen behavior.
- 
+
 @@ -67,7 +67,7 @@ The Sphinx guides and API reference explain graph construction, route selection,
- 
+
  Input arrays use image indexing `[row, column]`. Public coordinates use `(x=column, y=row)`, in pixel units.
- 
+
 -Pixel adjacency uses orthogonal neighbors and permits a diagonal neighbor only when neither orthogonal bridge pixel is foreground. This bridge-aware rule is neither plain four-connectivity nor naïve eight-connectivity, and it determines graph topology. Adjacent junction pixels remain separate graph nodes. Graph construction preserves the input topology by default because spur pruning defaults to zero.
 +Pixel adjacency uses orthogonal neighbors and permits a diagonal neighbor only when neither orthogonal bridge pixel is foreground. Raw junction seeds are skeleton pixels with degree greater than two. Nearby seeds are contracted into bounded semantic regions using geodesic neighborhoods scaled by the local ink radius; without a radius map, pre-thinned input contracts only directly or near-adjacent seeds conservatively. Endpoints are never absorbed. A region's representative node degree is the count of its boundary ports, with a self-edge contributing two ports. A single physical junction may be encountered multiple times in a traversal without becoming multiple graph nodes.
- 
- 
+
+
  Graph edges represent undirected raster evidence. Their stored endpoint and edge order is deterministic for geometry assembly, not physical drawing order. `SkeletonPath` is a non-repeating route through part of a graph; `SkeletonWalk` is an ordered traversal that may repeat edges to cover a connected graph.
 @@ -78,10 +78,12 @@ Graph edges represent undirected raster evidence. Their stored endpoint and edge
- 
+
  The public models are frozen. Graph and path collections are tuples, graph and path coordinate arrays are read-only, and inventory mappings are immutable.
- 
+
 -- `SkeletonGraph` contains nodes and edges, with `component_count`, `cycle_count`, `endpoint_count`, and `junction_count` graph diagnostics.
 -- `SkeletonAnalysis` contains owned read-only mask, skeleton, radius, and confidence arrays, optional component labels, and the graph. Its graph diagnostics delegate to `SkeletonGraph`.
 +- `SkeletonGraph` contains nodes, edges, and semantic `junction_regions`, with `component_count`, `cycle_count`, `endpoint_count`, `junction_count`, and `raw_junction_seed_count` diagnostics.
@@ -54,22 +54,22 @@ index e113694..5fe64ab 100644
  - `SkeletonWalk` records ordered `RouteStep` values, endpoints, geometry, covered edges, and repeats. Its `reversed()` operation explicitly reverses both traversal order and direction; partial walks support multi-stroke hypotheses.
 @@ -178,7 +180,7 @@ Run the complete example with `python examples/11_stroke_hypotheses.py` after in
  The supported package-root exports are:
- 
+
  - Constants: `DEFAULT_MAX_PATHS`, `DEFAULT_RANKING_POLICY`, `DEFAULT_SEARCH_LIMITS`, `DEFAULT_STROKE_SEARCH_LIMITS`, `DEFAULT_STROKE_SEARCH_POLICY`, and `__version__`.
 -- Models and errors: `DisconnectedGraphError`, `JunctionPairing`, `JunctionPairingLimitError`, `NoFeasiblePathError`, path scoring and limit types, `RouteStep`, `SkeletonAnalysis`, graph/image/path/walk models, `StrokeHypothesis`, `StrokeHypothesisScore`, `StrokeSearchLimitError`, `StrokeSearchLimits`, `StrokeSearchPolicy`, `TopologyPathInventory`, and `TopologyRoute`.
 +- Models and errors: `DisconnectedGraphError`, `JunctionPairing`, `JunctionPairingLimitError`, `JunctionRegion`, `JunctionRegionOptions`, `NoFeasiblePathError`, path scoring and limit types, `RouteStep`, `SkeletonAnalysis`, graph/image/path/walk models, `StrokeHypothesis`, `StrokeHypothesisScore`, `StrokeSearchLimitError`, `StrokeSearchLimits`, `StrokeSearchPolicy`, `TopologyPathInventory`, and `TopologyRoute`.
  - Graph, image, and hypothesis functions: `analyze_mask`, `build_skeleton_graph`, `covering_walk`, `graph_from_mask`, `graph_from_skeleton`, `prune_spurs`, `rank_covering_walks`, and `stroke_hypotheses_from_analysis`.
  - Route functions: `prepare_topology_paths`, `rank_paths`, and `select_path`.
- 
+
 @@ -201,7 +203,7 @@ SkeletonPaths owns raster connectivity, graph construction, route enumeration, a
- 
+
  SkeletonPaths was extracted and adapted from InkGrammar. It has no InkGrammar runtime dependency and is intended for general raster-skeleton topology, not handwriting-specific behavior.
- 
+
 -The package is pre-1.0. Public API changes may occur in minor releases while these contracts mature. Versions are derived from Git tags with `setuptools-scm`; tag releases with names such as `v0.1.0`. Source builds outside a Git checkout use the configured development fallback version.
 +The package is pre-1.0, so behaviorally significant topology changes belong in a new minor release line, for example `0.2.x`. This upgrade contracts raw junction-pixel clusters into semantic regions and changes graph topology; graph-local edge IDs are implementation identifiers and are not stable across topology-model upgrades. Versions are derived from Git tags with `setuptools-scm`; tag releases with names such as `v0.1.0`. Source builds outside a Git checkout use the configured development fallback version.
- 
+
  ## Development checks
- 
+
 diff --git a/docs/getting-started.md b/docs/getting-started.md
 index 7e02015..de3e04e 100644
 --- a/docs/getting-started.md
@@ -77,20 +77,20 @@ index 7e02015..de3e04e 100644
 @@ -32,7 +32,7 @@ print(graph.endpoint_count)  # 2
  print(selection.path.xy)  # public coordinates are (x, y)
  ```
- 
+
 -Raster pixels with degree other than two become graph nodes. Degree-two chains are compressed into edges. The graph is undirected, so a path's start and end order is for geometry assembly and ranking, not a physical traversal direction. Short spurs are preserved unless a positive pruning threshold is supplied.
 +Degree-one endpoints remain separate graph nodes. High-degree skeleton pixels are raw junction seeds, which are contracted into bounded semantic junction regions using local ink radius when available. Junction node degree counts boundary ports, and a self-edge contributes two ports. Radius-free pre-thinned input only contracts directly or near-adjacent seeds conservatively. Degree-two chains outside regions become graph edges; short spurs are preserved unless a positive pruning threshold is supplied.
- 
+
  The full executable source from `examples/01_basic_straight.py` is included below:
- 
+
 diff --git a/docs/guide/graph-construction.md b/docs/guide/graph-construction.md
 index cda72f4..c111d6e 100644
 --- a/docs/guide/graph-construction.md
 +++ b/docs/guide/graph-construction.md
 @@ -37,11 +37,12 @@ Orthogonal foreground neighbors connect. A diagonal pair connects only when neit
- 
+
  ## Graph compression
- 
+
 -- Every foreground pixel whose raster-topology degree is not two becomes a node.
 -- Degree-two pixel chains collapse into graph edges.
 -- An all-degree-two connected component receives a deterministic representative node.
@@ -102,13 +102,13 @@ index cda72f4..c111d6e 100644
 +- Each region has one representative node. Its graph degree is the number of boundary ports, so a self-edge contributes two ports.
 +- An all-degree-two connected component receives a deterministic cycle anchor. Degree-two chains outside regions become graph edges.
 +- Edge length is the assembled polyline length in pixels; graph-local edge IDs are implementation identifiers, not stable across topology-model upgrades.
- 
+
  Edge geometry is stored from endpoint node `a` to node `b`. This deterministic storage orientation supports geometry assembly and ranking; it does not imply physical drawing direction or traversal order.
- 
+
 @@ -83,4 +84,7 @@ The mask and confidence example is maintained in `examples/` and included here w
- 
+
  {class}`skeletonpaths.SkeletonGraph` exposes graph-level `component_count`, `cycle_count`, `endpoint_count`, and `junction_count`. The graph cycle diagnostic is the cyclomatic count `max(0, |E| - |V| + component_count)`. It describes the whole graph, not a route. See {doc}`path-selection` for route-level cycle constraints.
- 
+
 +
 +`junction_count` counts semantic regions, not raw high-degree skeleton pixels or how often a walk encounters a region. `SkeletonGraph.raw_junction_seed_count` and `SkeletonAnalysis.raw_junction_seed_count` are engineering diagnostics. `SkeletonAnalysis.junction_regions` exposes immutable `JunctionRegion` records with representative center, radius, absorbed support pixels, port count, and confidence. The representative node's degree equals its port count; a self-edge contributes two ports, while a traversal may visit the same semantic region more than once.
 +
@@ -119,8 +119,8 @@ index aa5c1c9..6d1446f 100644
 +++ b/docs/reference/api.md
 @@ -105,6 +105,17 @@ The package root, `skeletonpaths`, is the supported import surface. The explicit
  ```
- 
- 
+
+
 +```{eval-rst}
 +.. autoclass:: skeletonpaths.JunctionRegion
 +   :members:
@@ -140,9 +140,9 @@ index d81b40a..8458976 100644
 --- a/docs/reference/behavior-contracts.md
 +++ b/docs/reference/behavior-contracts.md
 @@ -6,6 +6,12 @@ This page collects concise integration guarantees. See the {doc}`../guide/graph-
- 
+
  Raster arrays use `[row, column]` indexing. Public geometry uses `(x, y) = (column, row)` in pixel units. Graph topology and edges are undirected evidence; deterministic node, edge, and endpoint storage order supports geometry assembly, not physical drawing order. `SkeletonPath` is a connected candidate route without repeated edge IDs. `SkeletonWalk` is an ordered traversal that may repeat edges to cover a connected graph.
- 
+
 +## Semantic junction regions
 +
 +`raw_junction_seed_count` counts skeleton pixels with raster degree greater than two before contraction. `junction_count` counts semantic `JunctionRegion` values, not raw pixels or traversal encounters. A region has one representative graph node, absorbed skeleton support, a local radius, confidence, and boundary ports. Semantic junction-node degree is its port count; a self-edge contributes two ports, and a graph walk may encounter the same region multiple times. Endpoint seeds are never absorbed. Mask analysis uses its source-mask radius map for bounded region growth; radius-free skeleton input uses conservative adjacent-seed contraction.
@@ -150,21 +150,21 @@ index d81b40a..8458976 100644
 +`JunctionRegionOptions` configures contraction. Edge IDs are graph-local implementation identifiers and may change across topology-model upgrades.
 +
  {class}`skeletonpaths.SkeletonGraph` `cycle_count` is graph-level. {class}`skeletonpaths.TopologyRoute` and {class}`skeletonpaths.SkeletonPath` `cycle_count` values are route-level. `expected_cycles` constrains the route being considered, not every component of the graph.
- 
+
  ## Immutability
 diff --git a/docs/subpixel-centerlines.md b/docs/subpixel-centerlines.md
 index 2191b89..e5fcd9e 100644
 --- a/docs/subpixel-centerlines.md
 +++ b/docs/subpixel-centerlines.md
 @@ -51,7 +51,7 @@ Confidence combines a boundary-gradient score and agreement between the observed
- 
+
  Shared topology nodes have one refined coordinate in `geometry.node_xy`, reused by all incident refined edges. Junction neighborhoods are guarded against ambiguous cross-sections. A pure loop may be fit as two open spline segments around a deterministic internal split; that split is not exposed as a graph node and does not change cycle or edge identity.
- 
+
 -PlanarCurve's public `fit_polyline_spline()` API selects a bounded number of controls and provides the analytic differential geometry. `SubpixelCenterlineOptions` controls probe spacing and range, tangent window, junction guard, confidence thresholds, fit passes, output spacing, curvature-radius rejection, and work budgets. `max_refinement_samples` and `max_normal_probes` bound work; exceeding either raises `SubpixelReconstructionLimitError`.
 +PlanarCurve's public `fit_polyline_spline()` API selects a bounded number of controls and provides the analytic differential geometry. `SubpixelCenterlineOptions` controls probe spacing and range, tangent window, fixed and radius-adaptive junction guards, the maximum guarded fraction from each edge end, confidence thresholds, fit passes, output spacing, curvature-radius rejection, and work budgets. Samples on junction-region support are always excluded. `max_refinement_samples` and `max_normal_probes` bound work; exceeding either raises `SubpixelReconstructionLimitError`.
- 
+
  ## Refined walks
- 
+
 diff --git a/skeletonpaths/__init__.py b/skeletonpaths/__init__.py
 index 0a61ed4..1c5ee78 100644
 --- a/skeletonpaths/__init__.py
@@ -174,7 +174,7 @@ index 0a61ed4..1c5ee78 100644
      stroke_hypotheses_from_analysis,
  )
 +from .model import JunctionRegion, JunctionRegionOptions
- 
+
  try:
      __version__ = version("skeletonpaths")
 @@ -72,6 +73,8 @@ __all__ = [
@@ -194,10 +194,10 @@ index c929242..33abc59 100644
  from collections import deque
 +from heapq import heappop, heappush
  from math import hypot
- 
+
  import numpy as np
  from numpy.typing import ArrayLike
- 
+
 -from .model import Pixel, SkeletonEdge, SkeletonGraph, SkeletonNode
 +from .model import (
 +    JunctionRegion,
@@ -207,13 +207,13 @@ index c929242..33abc59 100644
 +    SkeletonGraph,
 +    SkeletonNode,
 +)
- 
- 
+
+
  def _pixel_adjacency(skeleton: np.ndarray) -> dict[Pixel, tuple[Pixel, ...]]:
 @@ -135,12 +143,197 @@ def _radius_and_confidence(
      return radius, float(confidence_map[row, column])
- 
- 
+
+
 +def _junction_region_supports(
 +    seeds: list[Pixel],
 +    adjacency: dict[Pixel, tuple[Pixel, ...]],
@@ -456,7 +456,7 @@ index c929242..33abc59 100644
 +    edges, ports = _trace_graph_edges(
 +        node_supports, node_pixels, adjacency, radius, confidence_map
 +    )
- 
+
 -    ordered_nodes = sorted(node_pixels)
 -    node_ids = {pixel: index for index, pixel in enumerate(ordered_nodes)}
      nodes = []
@@ -496,7 +496,7 @@ index c929242..33abc59 100644
                  confidence=confidence_value,
              )
          )
- 
+
 -    visited: set[frozenset[Pixel]] = set()
 -    edges = []
 -    for start in ordered_nodes:
@@ -544,7 +544,7 @@ index c929242..33abc59 100644
 +    return SkeletonGraph(
 +        tuple(nodes), tuple(edges), tuple(junction_regions), raw_junction_seed_count=len(raw_seeds)
 +    )
- 
+
  def graph_from_skeleton(
      skeleton: ArrayLike,
 @@ -285,6 +486,7 @@ def graph_from_skeleton(
@@ -554,7 +554,7 @@ index c929242..33abc59 100644
 +    junction_options: JunctionRegionOptions | None = None,
  ) -> SkeletonGraph:
      """Build a graph from an already-thinned binary skeleton.
- 
+
 @@ -330,5 +532,6 @@ def graph_from_skeleton(
          min_spur_length_px=min_spur_length,
          radius=radius,
@@ -568,8 +568,8 @@ index 74cf9ca..b1ac67a 100644
 +++ b/skeletonpaths/hypotheses.py
 @@ -66,18 +66,17 @@ def _components(graph: SkeletonGraph) -> tuple[tuple[tuple[int, ...], tuple[int,
      return tuple(components)
- 
- 
+
+
 -def _incident_edges(graph: SkeletonGraph) -> dict[int, list[int]]:
 +def _incident_edges(graph: SkeletonGraph) -> dict[int, list[tuple[int, str]]]:
      incident = {node.id: [] for node in graph.nodes}
@@ -585,16 +585,16 @@ index 74cf9ca..b1ac67a 100644
 +    for ports in incident.values():
 +        ports.sort()
      return incident
- 
- 
+
+
 +
  def _guide_arrays(guide_paths: Sequence[ArrayLike] | None) -> tuple[np.ndarray, ...]:
      if guide_paths is None:
          return ()
 @@ -96,14 +95,18 @@ def _guide_arrays(guide_paths: Sequence[ArrayLike] | None) -> tuple[np.ndarray,
      return tuple(guides)
- 
- 
+
+
 -def _edge_outward_tangent(graph: SkeletonGraph, edge_id: int, node_id: int) -> np.ndarray:
 +def _edge_outward_tangent(
 +    graph: SkeletonGraph, port: tuple[int, str], node_id: int
@@ -611,8 +611,8 @@ index 74cf9ca..b1ac67a 100644
 -    raise ValueError("junction edge does not touch its node")
 +    raise ValueError("junction port does not touch its node")
 +
- 
- 
+
+
  def _guide_tangent_cost(
 @@ -132,35 +135,38 @@ def _junction_options(
  ) -> tuple[tuple[JunctionPairing, ...], ...]:
@@ -623,7 +623,7 @@ index 74cf9ca..b1ac67a 100644
      ]
      if not junctions:
          return ((),)
- 
+
      pairing_count = [0]
      options_by_node = []
 -    for node_id, edge_ids in junctions:
@@ -634,7 +634,7 @@ index 74cf9ca..b1ac67a 100644
 +            port: _edge_outward_tangent(graph, port, node_id) for port in ports
          }
          candidates = []
- 
+
          def enumerate_matchings(
 -            remaining: tuple[int, ...],
 -            pairs: tuple[tuple[int, int], ...],
@@ -681,7 +681,7 @@ index 74cf9ca..b1ac67a 100644
 @@ -190,8 +198,10 @@ def _junction_options(
                  next_remaining = remaining[1:index] + remaining[index + 1 :]
                  enumerate_matchings(next_remaining, pairs + ((first, second),))
- 
+
 -        enumerate_matchings(tuple(edge_ids), ())
 -        candidates.sort(key=lambda item: (item.tangent_cost, item.pairs, item.unpaired_edges))
 +        enumerate_matchings(tuple(ports), ())
@@ -689,12 +689,12 @@ index 74cf9ca..b1ac67a 100644
 +            key=lambda item: (item.tangent_cost, item.pairs, item.port_pairs, item.unpaired_ports)
 +        )
          options_by_node.append(tuple(candidates))
- 
+
      combinations = []
 @@ -217,24 +227,38 @@ def _junction_options(
      return tuple(combinations)
- 
- 
+
+
 +
  def _transitions(
      graph: SkeletonGraph, pairings: tuple[JunctionPairing, ...]
@@ -724,8 +724,8 @@ index 74cf9ca..b1ac67a 100644
              transitions[pairing.node_id, first] = second
              transitions[pairing.node_id, second] = first
      return transitions
- 
- 
+
+
 +
  def _walk_from_steps(
 -    graph: SkeletonGraph, steps: tuple[tuple[int, int], ...], *, isolated_node: int | None = None
@@ -739,7 +739,7 @@ index 74cf9ca..b1ac67a 100644
 @@ -253,25 +277,25 @@ def _walk_from_steps(
              length_px=0.0,
          )
- 
+
 -    start_node = steps[0][1]
 +    first_edge_id, first_side = steps[0]
 +    first_edge = graph.edges[first_edge_id]
@@ -771,8 +771,8 @@ index 74cf9ca..b1ac67a 100644
          directions.append(direction)
 @@ -290,6 +314,7 @@ def _walk_from_steps(
      )
- 
- 
+
+
 +
  def _decompose(
      graph: SkeletonGraph,
@@ -784,7 +784,7 @@ index 74cf9ca..b1ac67a 100644
 +    incident = _incident_edges(graph)
      used: set[int] = set()
      walks = []
- 
+
 -    def trace(edge_id: int, source_node: int) -> SkeletonWalk:
 +    def trace(edge_id: int, source_side: str) -> SkeletonWalk:
          steps = []
@@ -810,7 +810,7 @@ index 74cf9ca..b1ac67a 100644
 -            current_edge, current_node = following, next_node
 +            current_edge, current_side = following
          return _walk_from_steps(graph, tuple(steps))
- 
+
 -    start_sides = []
 -    for edge_id, edge in enumerate(graph.edges):
 -        for node_id in (edge.a, edge.b):
@@ -847,15 +847,15 @@ index 74cf9ca..b1ac67a 100644
 +            steps.append((edge_id, source_side))
          walks.append(_walk_from_steps(graph, tuple(steps)))
      return tuple(walks)
- 
- 
+
+
 +
 +
  def _orient_walk(
      walk: SkeletonWalk,
      guides: tuple[np.ndarray, ...],
 @@ -482,7 +512,10 @@ def _rank_value(hypothesis: StrokeHypothesis, policy: StrokeSearchPolicy) -> flo
- 
+
  def _signature(hypothesis: StrokeHypothesis) -> tuple[object, ...]:
      routes = tuple(sorted(tuple(sorted(walk.edge_ids)) for walk in hypothesis.walks))
 -    pairings = tuple((pairing.node_id, pairing.pairs) for pairing in hypothesis.junction_pairings)
@@ -864,20 +864,20 @@ index 74cf9ca..b1ac67a 100644
 +        for pairing in hypothesis.junction_pairings
 +    )
      return routes, pairings
- 
- 
+
+
 diff --git a/skeletonpaths/image.py b/skeletonpaths/image.py
 index 951242e..5f91fcd 100644
 --- a/skeletonpaths/image.py
 +++ b/skeletonpaths/image.py
 @@ -4,7 +4,7 @@ import numpy as np
  from numpy.typing import ArrayLike
- 
+
  from .graph import _binary_image, graph_from_skeleton, prune_spurs
 -from .model import SkeletonAnalysis, SkeletonGraph
 +from .model import JunctionRegionOptions, SkeletonAnalysis, SkeletonGraph
- 
- 
+
+
  def analyze_mask(
 @@ -15,6 +15,7 @@ def analyze_mask(
      radius: ArrayLike | None = None,
@@ -886,7 +886,7 @@ index 951242e..5f91fcd 100644
 +    junction_options: JunctionRegionOptions | None = None,
  ) -> SkeletonAnalysis:
      """Skeletonize a binary mask and return its raster data and topology.
- 
+
 @@ -134,7 +135,9 @@ def analyze_mask(
              "skeletonizing observed ink requires scikit-image; install skeletonpaths[image]"
          ) from error
@@ -905,7 +905,7 @@ index 951242e..5f91fcd 100644
 +    junction_options: JunctionRegionOptions | None = None,
  ) -> SkeletonGraph:
      """Skeletonize a binary mask and build its topology graph.
- 
+
 @@ -165,4 +169,5 @@ def graph_from_mask(
          radius=radius,
          confidence=confidence,
@@ -919,7 +919,7 @@ index e5d31ce..4512a14 100644
 @@ -10,6 +10,89 @@ import numpy as np
  Point = tuple[float, float]
  Pixel = tuple[int, int]
- 
+
 +
 +@dataclass(frozen=True)
 +class JunctionRegion:
@@ -1004,8 +1004,8 @@ index e5d31ce..4512a14 100644
 +            raise ValueError("representative must select a supported radius-weighted method")
 +
  DEFAULT_MAX_PATHS = 10_000
- 
- 
+
+
 @@ -24,7 +107,7 @@ class SkeletonNode:
      xy : tuple of float
          Pixel coordinate as ``(x, y) = (column, row)``.
@@ -1016,12 +1016,12 @@ index e5d31ce..4512a14 100644
          Radius at the node pixel, in pixels.
      confidence : float
 @@ -138,6 +221,8 @@ class SkeletonGraph:
- 
+
      nodes: tuple[SkeletonNode, ...]
      edges: tuple[SkeletonEdge, ...]
 +    junction_regions: tuple[JunctionRegion, ...] = ()
 +    raw_junction_seed_count: int = 0
- 
+
      def __post_init__(self) -> None:
          nodes = tuple(self.nodes)
 @@ -152,6 +237,25 @@ class SkeletonGraph:
@@ -1049,9 +1049,9 @@ index e5d31ce..4512a14 100644
 +        object.__setattr__(self, "raw_junction_seed_count", int(raw_count))
          object.__setattr__(self, "nodes", nodes)
          object.__setattr__(self, "edges", edges)
- 
+
 @@ -192,8 +296,10 @@ class SkeletonGraph:
- 
+
      @property
      def junction_count(self) -> int:
 -        """Number of graph nodes whose raster-topology degree exceeds two."""
@@ -1060,13 +1060,13 @@ index e5d31ce..4512a14 100644
 +        return len(self.junction_regions) if self.junction_regions else sum(
 +            node.degree > 2 for node in self.nodes
 +        )
- 
- 
+
+
  @dataclass(frozen=True)
 @@ -301,6 +407,16 @@ class SkeletonAnalysis(SkeletonImage):
          if component_labels is not None:
              object.__setattr__(self, "component_labels", component_labels)
- 
+
 +    @property
 +    def junction_regions(self) -> tuple[JunctionRegion, ...]:
 +        """Semantic junction diagnostics generated from the analyzed mask."""
@@ -1081,19 +1081,19 @@ index e5d31ce..4512a14 100644
      def component_count(self) -> int:
          return self.graph.component_count
 @@ -574,17 +690,20 @@ class StrokeSearchPolicy:
- 
+
  @dataclass(frozen=True)
  class JunctionPairing:
 -    """One generic candidate pairing of branches at a graph junction.
 +    """One generic candidate pairing of branch ports at a graph junction.
- 
+
 -    ``pairs`` contains edge-ID pairs; ``unpaired_edges`` retains branches not
 -    paired by this candidate. ``tangent_cost`` is generic geometry evidence, not
 -    a claim about the physically correct stroke continuation.
 +    ``pairs`` retains the edge-ID view. ``port_pairs`` distinguishes the two
 +    incidences of a self-loop when edge IDs alone are ambiguous.
      """
- 
+
      node_id: int
      pairs: tuple[tuple[int, int], ...]
      unpaired_edges: tuple[int, ...]
@@ -1102,7 +1102,7 @@ index e5d31ce..4512a14 100644
 +        tuple[tuple[int, Literal["a", "b"]], tuple[int, Literal["a", "b"]]], ...
 +    ] = ()
 +    unpaired_ports: tuple[tuple[int, Literal["a", "b"]], ...] = ()
- 
+
      def __post_init__(self) -> None:
          if (
 @@ -604,14 +723,51 @@ class JunctionPairing:
@@ -1156,8 +1156,8 @@ index e5d31ce..4512a14 100644
          object.__setattr__(self, "tangent_cost", float(self.tangent_cost))
 +        object.__setattr__(self, "port_pairs", tuple(sorted(port_pairs)))
 +        object.__setattr__(self, "unpaired_ports", tuple(sorted(unpaired_ports)))
- 
- 
+
+
  @dataclass(frozen=True)
 @@ -1189,6 +1345,8 @@ class SubpixelCenterlineOptions:
      max_normal_search_px: float | None = None
@@ -1229,8 +1229,8 @@ index 31501b1..7b00540 100644
          candidate, radius, confidence, reason, probes = _cross_section(
 @@ -295,6 +315,7 @@ def _observe_edge(
      return observations
- 
- 
+
+
 +
  def _nearest_valid(observations: _Observations, from_start: bool) -> int | None:
      indices = np.flatnonzero(observations.valid)
@@ -1564,4 +1564,4 @@ index 1eb996e..7d8efdb 100644
 +def test_junction_motifs_use_semantic_regions(segments, expected):
      graph = graph_from_skeleton(_draw_segments(segments))
      assert (graph.endpoint_count, graph.junction_count, graph.cycle_count) == expected
- 
+
