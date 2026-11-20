@@ -4,7 +4,7 @@ import numpy as np
 from numpy.typing import ArrayLike
 
 from .graph import _binary_image, graph_from_skeleton, prune_spurs
-from .model import SkeletonAnalysis, SkeletonGraph
+from .model import JunctionRegionOptions, SkeletonAnalysis, SkeletonGraph
 
 
 def analyze_mask(
@@ -15,6 +15,7 @@ def analyze_mask(
     radius: ArrayLike | None = None,
     confidence: ArrayLike | None = None,
     min_component_area: int = 0,
+    junction_options: JunctionRegionOptions | None = None,
 ) -> SkeletonAnalysis:
     """Skeletonize a binary mask and return its raster data and topology.
 
@@ -134,7 +135,9 @@ def analyze_mask(
             "skeletonizing observed ink requires scikit-image; install skeletonpaths[image]"
         ) from error
     skeleton = prune_spurs(skeletonize(source), min_spur_length)
-    graph = graph_from_skeleton(skeleton, radius=radius_map, confidence=confidence_map)
+    graph = graph_from_skeleton(
+        skeleton, radius=radius_map, confidence=confidence_map, junction_options=junction_options
+    )
     return SkeletonAnalysis(
         mask=source,
         skeleton=skeleton,
@@ -153,6 +156,7 @@ def graph_from_mask(
     radius: ArrayLike | None = None,
     confidence: ArrayLike | None = None,
     min_component_area: int = 0,
+    junction_options: JunctionRegionOptions | None = None,
 ) -> SkeletonGraph:
     """Skeletonize a binary mask and build its topology graph.
 
@@ -165,4 +169,5 @@ def graph_from_mask(
         radius=radius,
         confidence=confidence,
         min_component_area=min_component_area,
+        junction_options=junction_options,
     ).graph

@@ -32,7 +32,7 @@ print(graph.endpoint_count)  # 2
 print(selection.path.xy)  # public coordinates are (x, y)
 ```
 
-Raster pixels with degree other than two become graph nodes. Degree-two chains are compressed into edges. The graph is undirected, so a path's start and end order is for geometry assembly and ranking, not a physical traversal direction. Short spurs are preserved unless a positive pruning threshold is supplied.
+Degree-one endpoints remain separate graph nodes. High-degree skeleton pixels are raw junction seeds, which are contracted into bounded semantic junction regions using local ink radius when available. Junction node degree counts boundary ports, and a self-edge contributes two ports. Radius-free pre-thinned input only contracts directly or near-adjacent seeds conservatively. Degree-two chains outside regions become graph edges; short spurs are preserved unless a positive pruning threshold is supplied.
 
 The full executable source from `examples/01_basic_straight.py` is included below:
 

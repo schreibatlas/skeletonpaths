@@ -57,6 +57,7 @@ from .core import (
     select_topology_path,
     stroke_hypotheses_from_analysis,
 )
+from .model import JunctionRegion, JunctionRegionOptions
 
 try:
     __version__ = version("skeletonpaths")
@@ -72,6 +73,8 @@ __all__ = [
     "DisconnectedGraphError",
     "JunctionPairing",
     "JunctionPairingLimitError",
+    "JunctionRegion",
+    "JunctionRegionOptions",
     "NoFeasiblePathError",
     "PathRankingPolicy",
     "PathScore",

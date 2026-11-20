@@ -10,6 +10,89 @@ import numpy as np
 Point = tuple[float, float]
 Pixel = tuple[int, int]
 
+
+@dataclass(frozen=True)
+class JunctionRegion:
+    """Immutable diagnostics for one semantic junction region.
+
+    ``xy`` is the representative center in ``(x, y)`` pixel coordinates. Support
+    pixels use image-index ``(row, column)`` coordinates.
+    """
+
+    node_id: int
+    xy: Point
+    radius_px: float
+    support_pixels: tuple[Pixel, ...]
+    port_count: int
+    confidence: float
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.node_id, bool)
+            or not isinstance(self.node_id, (int, np.integer))
+            or self.node_id < 0
+        ):
+            raise ValueError("junction node id must be a nonnegative integer")
+        if len(self.xy) != 2 or not np.isfinite(self.xy).all():
+            raise ValueError("junction coordinates must be a finite xy pair")
+        if not np.isfinite(self.radius_px) or self.radius_px < 0.0:
+            raise ValueError("junction radius must be finite and nonnegative")
+        if (
+            isinstance(self.port_count, bool)
+            or not isinstance(self.port_count, (int, np.integer))
+            or self.port_count < 0
+        ):
+            raise ValueError("junction port count must be a nonnegative integer")
+        if not np.isfinite(self.confidence) or not 0.0 <= self.confidence <= 1.0:
+            raise ValueError("junction confidence must be between zero and one")
+        support_pixels = tuple(tuple(pixel) for pixel in self.support_pixels)
+        if any(
+            len(pixel) != 2
+            or any(
+                isinstance(value, bool) or not isinstance(value, (int, np.integer))
+                for value in pixel
+            )
+            for pixel in support_pixels
+        ):
+            raise ValueError("junction support pixels must be integer row-column pairs")
+        object.__setattr__(self, "node_id", int(self.node_id))
+        object.__setattr__(self, "xy", (float(self.xy[0]), float(self.xy[1])))
+        object.__setattr__(self, "radius_px", float(self.radius_px))
+        object.__setattr__(
+            self, "support_pixels", tuple(tuple(map(int, pixel)) for pixel in support_pixels)
+        )
+        object.__setattr__(self, "port_count", int(self.port_count))
+        object.__setattr__(self, "confidence", float(self.confidence))
+
+
+@dataclass(frozen=True)
+class JunctionRegionOptions:
+    """Bounded controls for contracting raster junction seeds."""
+
+    enabled: bool = True
+    merge_radius_factor: float = 1.0
+    minimum_merge_radius_px: float = 1.0
+    maximum_merge_radius_px: float | None = None
+    representative: Literal["radius-weighted-medoid", "radius-weighted-centroid"] = (
+        "radius-weighted-medoid"
+    )
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.enabled, bool):
+            raise TypeError("enabled must be a bool")
+        for name in ("merge_radius_factor", "minimum_merge_radius_px"):
+            value = getattr(self, name)
+            if not np.isfinite(value) or value < 0.0:
+                raise ValueError(f"{name} must be finite and nonnegative")
+            object.__setattr__(self, name, float(value))
+        maximum = self.maximum_merge_radius_px
+        if maximum is not None:
+            if not np.isfinite(maximum) or maximum < self.minimum_merge_radius_px:
+                raise ValueError("maximum merge radius must be finite and at least the minimum")
+            object.__setattr__(self, "maximum_merge_radius_px", float(maximum))
+        if self.representative not in {"radius-weighted-medoid", "radius-weighted-centroid"}:
+            raise ValueError("representative must select a supported radius-weighted method")
+
 DEFAULT_MAX_PATHS = 10_000
 
 
@@ -24,7 +107,7 @@ class SkeletonNode:
     xy : tuple of float
         Pixel coordinate as ``(x, y) = (column, row)``.
     degree : int
-        Number of incident raster-topology neighbors at the node pixel.
+        Semantic graph degree. For junctions this is the number of boundary ports.
     radius_px : float
         Radius at the node pixel, in pixels.
     confidence : float
@@ -138,6 +221,8 @@ class SkeletonGraph:
 
     nodes: tuple[SkeletonNode, ...]
     edges: tuple[SkeletonEdge, ...]
+    junction_regions: tuple[JunctionRegion, ...] = ()
+    raw_junction_seed_count: int = 0
 
     def __post_init__(self) -> None:
         nodes = tuple(self.nodes)
@@ -152,6 +237,25 @@ class SkeletonGraph:
                 edge.xy[-1], node_by_id[edge.b].xy
             ):
                 raise ValueError("edge xy endpoints must match its graph nodes")
+        junction_regions = tuple(self.junction_regions)
+        if any(not isinstance(region, JunctionRegion) for region in junction_regions):
+            raise TypeError("junction_regions must contain JunctionRegion values")
+        if len({region.node_id for region in junction_regions}) != len(junction_regions):
+            raise ValueError("junction region node ids must be unique")
+        for region in junction_regions:
+            if region.node_id not in node_by_id:
+                raise ValueError("junction region references an unknown graph node")
+            if node_by_id[region.node_id].degree != region.port_count:
+                raise ValueError("junction region port count must match its graph node degree")
+        raw_count = self.raw_junction_seed_count
+        if (
+            isinstance(raw_count, bool)
+            or not isinstance(raw_count, (int, np.integer))
+            or raw_count < 0
+        ):
+            raise ValueError("raw junction seed count must be a nonnegative integer")
+        object.__setattr__(self, "junction_regions", junction_regions)
+        object.__setattr__(self, "raw_junction_seed_count", int(raw_count))
         object.__setattr__(self, "nodes", nodes)
         object.__setattr__(self, "edges", edges)
 
@@ -192,8 +296,10 @@ class SkeletonGraph:
 
     @property
     def junction_count(self) -> int:
-        """Number of graph nodes whose raster-topology degree exceeds two."""
-        return sum(node.degree > 2 for node in self.nodes)
+        """Number of semantic junction regions, or high-degree nodes for a hand-built graph."""
+        return len(self.junction_regions) if self.junction_regions else sum(
+            node.degree > 2 for node in self.nodes
+        )
 
 
 @dataclass(frozen=True)
@@ -300,6 +406,16 @@ class SkeletonAnalysis(SkeletonImage):
         object.__setattr__(self, "confidence", confidence)
         if component_labels is not None:
             object.__setattr__(self, "component_labels", component_labels)
+
+    @property
+    def junction_regions(self) -> tuple[JunctionRegion, ...]:
+        """Semantic junction diagnostics generated from the analyzed mask."""
+        return self.graph.junction_regions
+
+    @property
+    def raw_junction_seed_count(self) -> int:
+        """Number of raw high-degree skeleton pixels before region contraction."""
+        return self.graph.raw_junction_seed_count
 
     @property
     def component_count(self) -> int:
@@ -574,17 +690,20 @@ class StrokeSearchPolicy:
 
 @dataclass(frozen=True)
 class JunctionPairing:
-    """One generic candidate pairing of branches at a graph junction.
+    """One generic candidate pairing of branch ports at a graph junction.
 
-    ``pairs`` contains edge-ID pairs; ``unpaired_edges`` retains branches not
-    paired by this candidate. ``tangent_cost`` is generic geometry evidence, not
-    a claim about the physically correct stroke continuation.
+    ``pairs`` retains the edge-ID view. ``port_pairs`` distinguishes the two
+    incidences of a self-loop when edge IDs alone are ambiguous.
     """
 
     node_id: int
     pairs: tuple[tuple[int, int], ...]
     unpaired_edges: tuple[int, ...]
     tangent_cost: float
+    port_pairs: tuple[
+        tuple[tuple[int, Literal["a", "b"]], tuple[int, Literal["a", "b"]]], ...
+    ] = ()
+    unpaired_ports: tuple[tuple[int, Literal["a", "b"]], ...] = ()
 
     def __post_init__(self) -> None:
         if (
@@ -604,14 +723,51 @@ class JunctionPairing:
             for edge_id in edge_ids
         ):
             raise ValueError("junction edge IDs must be nonnegative integers")
-        if len(set(edge_ids)) != len(edge_ids):
-            raise ValueError("junction pairing edge IDs must be unique")
+
+        def normalize_port(port) -> tuple[int, Literal["a", "b"]]:
+            if (
+                len(port) != 2
+                or isinstance(port[0], bool)
+                or not isinstance(port[0], (int, np.integer))
+                or port[0] < 0
+                or port[1] not in {"a", "b"}
+            ):
+                raise ValueError("junction ports must contain an edge ID and endpoint side")
+            return int(port[0]), port[1]
+
+        raw_port_pairs = tuple(tuple(pair) for pair in self.port_pairs)
+        if any(len(pair) != 2 for pair in raw_port_pairs):
+            raise ValueError("junction port pairs must contain two ports")
+        port_pairs = tuple(
+            tuple(sorted((normalize_port(pair[0]), normalize_port(pair[1]))))
+            for pair in raw_port_pairs
+        )
+        unpaired_ports = tuple(normalize_port(port) for port in self.unpaired_ports)
+        has_port_data = bool(port_pairs or unpaired_ports)
+        if has_port_data:
+            all_ports = [port for pair in port_pairs for port in pair] + list(unpaired_ports)
+            if len(set(all_ports)) != len(all_ports):
+                raise ValueError("junction pairing ports must be unique")
+            projected_pairs = tuple(
+                sorted(tuple(sorted((first[0], second[0]))) for first, second in port_pairs)
+            )
+            if tuple(sorted(normalized_pairs)) != projected_pairs:
+                raise ValueError("edge-ID pairs must match the supplied port pairs")
+            projected_unpaired = tuple(sorted({port[0] for port in unpaired_ports}))
+            if tuple(sorted(set(unpaired))) != projected_unpaired:
+                raise ValueError("unpaired edge IDs must match the supplied unpaired ports")
+            if len(set(unpaired)) != len(unpaired):
+                raise ValueError("unpaired edge IDs must be unique")
+        elif len(set(edge_ids)) != len(edge_ids):
+            raise ValueError("junction pairing edge IDs must be unique without port data")
         if not np.isfinite(self.tangent_cost) or self.tangent_cost < 0.0:
             raise ValueError("junction tangent cost must be finite and nonnegative")
         object.__setattr__(self, "node_id", int(self.node_id))
         object.__setattr__(self, "pairs", tuple(sorted(normalized_pairs)))
         object.__setattr__(self, "unpaired_edges", tuple(sorted(int(edge) for edge in unpaired)))
         object.__setattr__(self, "tangent_cost", float(self.tangent_cost))
+        object.__setattr__(self, "port_pairs", tuple(sorted(port_pairs)))
+        object.__setattr__(self, "unpaired_ports", tuple(sorted(unpaired_ports)))
 
 
 @dataclass(frozen=True)
@@ -1189,6 +1345,8 @@ class SubpixelCenterlineOptions:
     max_normal_search_px: float | None = None
     tangent_window_px: float = 4.0
     junction_guard_px: float = 2.0
+    junction_guard_radius_factor: float = 1.0
+    junction_guard_max_edge_fraction: float = 0.25
     min_boundary_gradient: float = 0.02
     min_sample_confidence: float = 0.05
     refinement_passes: int = 2
@@ -1209,11 +1367,15 @@ class SubpixelCenterlineOptions:
             if not np.isfinite(value) or value <= 0.0:
                 raise ValueError(f"{name} must be finite and positive")
             object.__setattr__(self, name, float(value))
-        for name in ("junction_guard_px", "min_boundary_gradient"):
+        for name in ("junction_guard_px", "junction_guard_radius_factor", "min_boundary_gradient"):
             value = getattr(self, name)
             if not np.isfinite(value) or value < 0.0:
                 raise ValueError(f"{name} must be finite and nonnegative")
             object.__setattr__(self, name, float(value))
+        fraction = self.junction_guard_max_edge_fraction
+        if not np.isfinite(fraction) or not 0.0 <= fraction <= 0.5:
+            raise ValueError("junction_guard_max_edge_fraction must be between zero and 0.5")
+        object.__setattr__(self, "junction_guard_max_edge_fraction", float(fraction))
         if self.max_normal_search_px is not None:
             if (
                 not np.isfinite(self.max_normal_search_px)

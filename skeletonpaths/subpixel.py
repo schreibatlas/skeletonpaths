@@ -261,13 +261,33 @@ def _observe_edge(
     distances = _cumulative_length(points)
     edge_length = float(distances[-1]) if len(distances) else 0.0
     node_by_id = {node.id: node for node in analysis.graph.nodes}
-    start_junction = node_by_id[edge.a].degree > 2
-    end_junction = node_by_id[edge.b].degree > 2
+    region_by_node = {region.node_id: region for region in analysis.junction_regions}
+    start_region = region_by_node.get(edge.a)
+    end_region = region_by_node.get(edge.b)
+    start_support = set(start_region.support_pixels) if start_region is not None else set()
+    end_support = set(end_region.support_pixels) if end_region is not None else set()
+    start_junction = start_region is not None or node_by_id[edge.a].degree > 2
+    end_junction = end_region is not None or node_by_id[edge.b].degree > 2
+
+    def guard_for(region) -> float:
+        if region is None:
+            radius_guard = 0.0
+        else:
+            radius_guard = options.junction_guard_radius_factor * region.radius_px
+        requested = max(options.junction_guard_px, radius_guard)
+        return min(requested, options.junction_guard_max_edge_fraction * edge_length)
+
+    start_guard = guard_for(start_region) if start_junction else 0.0
+    end_guard = guard_for(end_region) if end_junction else 0.0
     for index, point in enumerate(points):
-        if start_junction and distances[index] < options.junction_guard_px:
+        pixel = (int(np.rint(point[1])), int(np.rint(point[0])))
+        if pixel in start_support or pixel in end_support:
             observations.reject(index, "junction_guard")
             continue
-        if end_junction and edge_length - distances[index] < options.junction_guard_px:
+        if start_junction and distances[index] < start_guard:
+            observations.reject(index, "junction_guard")
+            continue
+        if end_junction and edge_length - distances[index] < end_guard:
             observations.reject(index, "junction_guard")
             continue
         candidate, radius, confidence, reason, probes = _cross_section(
@@ -293,6 +313,7 @@ def _observe_edge(
                 if observations.confidence[index] < options.min_sample_confidence:
                     observations.reject(index, "radius_discontinuity")
     return observations
+
 
 
 def _nearest_valid(observations: _Observations, from_start: bool) -> int | None:

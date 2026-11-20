@@ -51,7 +51,7 @@ Confidence combines a boundary-gradient score and agreement between the observed
 
 Shared topology nodes have one refined coordinate in `geometry.node_xy`, reused by all incident refined edges. Junction neighborhoods are guarded against ambiguous cross-sections. A pure loop may be fit as two open spline segments around a deterministic internal split; that split is not exposed as a graph node and does not change cycle or edge identity.
 
-PlanarCurve's public `fit_polyline_spline()` API selects a bounded number of controls and provides the analytic differential geometry. `SubpixelCenterlineOptions` controls probe spacing and range, tangent window, junction guard, confidence thresholds, fit passes, output spacing, curvature-radius rejection, and work budgets. `max_refinement_samples` and `max_normal_probes` bound work; exceeding either raises `SubpixelReconstructionLimitError`.
+PlanarCurve's public `fit_polyline_spline()` API selects a bounded number of controls and provides the analytic differential geometry. `SubpixelCenterlineOptions` controls probe spacing and range, tangent window, fixed and radius-adaptive junction guards, the maximum guarded fraction from each edge end, confidence thresholds, fit passes, output spacing, curvature-radius rejection, and work budgets. Samples on junction-region support are always excluded. `max_refinement_samples` and `max_normal_probes` bound work; exceeding either raises `SubpixelReconstructionLimitError`.
 
 ## Refined walks
 

@@ -59,7 +59,7 @@ The Sphinx guides and API reference explain graph construction, route selection,
 
 1. Supply a two-dimensional binary mask or already-thinned skeleton. Boolean arrays and finite numeric arrays containing only `0` and `1` are accepted. NaN, infinity, and other numeric values are rejected.
 2. `graph_from_mask()` optionally removes small components, derives radius values from the source mask with a Euclidean distance transform when no radius map is supplied, and skeletonizes the remaining mask. `graph_from_skeleton()` skips skeletonization and defaults radius values to zero when no radius map is supplied.
-3. Raster pixels are converted to an undirected topology graph. Pixels whose degree differs from two remain graph nodes. An all-degree-two component receives a deterministic representative node. Degree-two chains become graph edges. Short spurs are preserved unless `min_spur_length` or `min_spur_length_px` is set above zero.
+3. Bridge-aware pixel adjacency is compressed into semantic graph nodes and edges. Endpoints remain distinct; raw degree-greater-than-two pixels are contracted into bounded junction regions using local stroke radius when available. A degree-two-only component receives a deterministic cycle anchor. Junction node degree is its boundary-port count, and degree-two chains become graph edges. Pass `junction_options=JunctionRegionOptions(...)` to configure contraction. Short spurs are preserved unless a positive pruning threshold is set.
 4. Use `rank_paths()` and `select_path()` for simple route selection. Use `rank_covering_walks()` for bounded multi-walk hypotheses, including explicit repeats, junction pairing alternatives, and ambiguity evidence.
 5. Pass candidate `xy` geometry and optional guide paths to PlanarCurve-backed scoring. Geometry and orientation help rank hypotheses but do not establish historical pen behavior.
 
@@ -67,7 +67,7 @@ The Sphinx guides and API reference explain graph construction, route selection,
 
 Input arrays use image indexing `[row, column]`. Public coordinates use `(x=column, y=row)`, in pixel units.
 
-Pixel adjacency uses orthogonal neighbors and permits a diagonal neighbor only when neither orthogonal bridge pixel is foreground. This bridge-aware rule is neither plain four-connectivity nor naïve eight-connectivity, and it determines graph topology. Adjacent junction pixels remain separate graph nodes. Graph construction preserves the input topology by default because spur pruning defaults to zero.
+Pixel adjacency uses orthogonal neighbors and permits a diagonal neighbor only when neither orthogonal bridge pixel is foreground. Raw junction seeds are skeleton pixels with degree greater than two. Nearby seeds are contracted into bounded semantic regions using geodesic neighborhoods scaled by the local ink radius; without a radius map, pre-thinned input contracts only directly or near-adjacent seeds conservatively. Endpoints are never absorbed. A region's representative node degree is the count of its boundary ports, with a self-edge contributing two ports. A single physical junction may be encountered multiple times in a traversal without becoming multiple graph nodes.
 
 
 Graph edges represent undirected raster evidence. Their stored endpoint and edge order is deterministic for geometry assembly, not physical drawing order. `SkeletonPath` is a non-repeating route through part of a graph; `SkeletonWalk` is an ordered traversal that may repeat edges to cover a connected graph.
@@ -78,10 +78,12 @@ Graph edges represent undirected raster evidence. Their stored endpoint and edge
 
 The public models are frozen. Graph and path collections are tuples, graph and path coordinate arrays are read-only, and inventory mappings are immutable.
 
-- `SkeletonGraph` contains nodes and edges, with `component_count`, `cycle_count`, `endpoint_count`, and `junction_count` graph diagnostics.
-- `SkeletonAnalysis` contains owned read-only mask, skeleton, radius, and confidence arrays, optional component labels, and the graph. Its graph diagnostics delegate to `SkeletonGraph`.
+- `SkeletonGraph` contains nodes, edges, and semantic `junction_regions`, with `component_count`, `cycle_count`, `endpoint_count`, `junction_count`, and `raw_junction_seed_count` diagnostics.
+- `SkeletonAnalysis` contains owned read-only mask, skeleton, radius, and confidence arrays, optional component labels, graph, semantic junction regions, and the raw junction-seed count.
+- `JunctionRegion` reports one representative node, center, local radius, absorbed support pixels, boundary-port count, and aggregate confidence. `JunctionRegionOptions` controls bounded region contraction.
+- `SkeletonNode.degree` is semantic port degree for junctions. Self-edges count twice, once for each port.
 - `SkeletonNode` records its integer ID, `(x, y)` coordinate, degree, radius in pixels, and confidence.
-- `SkeletonEdge` records endpoint node IDs, ordered `(x, y)` geometry, length in pixels, mean radius, and confidence.
+- `SkeletonEdge` records endpoint node IDs, ordered `(x, y)` geometry, length in pixels, mean radius, and confidence. Edge IDs assigned during enumeration are graph-local implementation identifiers, not stable across topology-model upgrades.
 - `TopologyRoute` records an ordered edge sequence, start and end node IDs, and route-level cycle count. Routes are undirected graph traversals with an explicit orientation for geometry assembly.
 - `SkeletonPath` contains assembled route geometry, edge IDs, oriented endpoint IDs, length, measured confidence, route cycle count, and `PathScore`. It does not contain selection ambiguity flags.
 - `SkeletonWalk` records ordered `RouteStep` values, endpoints, geometry, covered edges, and repeats. Its `reversed()` operation explicitly reverses both traversal order and direction; partial walks support multi-stroke hypotheses.
@@ -178,7 +180,7 @@ Run the complete example with `python examples/11_stroke_hypotheses.py` after in
 The supported package-root exports are:
 
 - Constants: `DEFAULT_MAX_PATHS`, `DEFAULT_RANKING_POLICY`, `DEFAULT_SEARCH_LIMITS`, `DEFAULT_STROKE_SEARCH_LIMITS`, `DEFAULT_STROKE_SEARCH_POLICY`, and `__version__`.
-- Models and errors: `DisconnectedGraphError`, `JunctionPairing`, `JunctionPairingLimitError`, `NoFeasiblePathError`, path scoring and limit types, `RouteStep`, `SkeletonAnalysis`, graph/image/path/walk models, `StrokeHypothesis`, `StrokeHypothesisScore`, `StrokeSearchLimitError`, `StrokeSearchLimits`, `StrokeSearchPolicy`, `TopologyPathInventory`, and `TopologyRoute`.
+- Models and errors: `DisconnectedGraphError`, `JunctionPairing`, `JunctionPairingLimitError`, `JunctionRegion`, `JunctionRegionOptions`, `NoFeasiblePathError`, path scoring and limit types, `RouteStep`, `SkeletonAnalysis`, graph/image/path/walk models, `StrokeHypothesis`, `StrokeHypothesisScore`, `StrokeSearchLimitError`, `StrokeSearchLimits`, `StrokeSearchPolicy`, `TopologyPathInventory`, and `TopologyRoute`.
 - Graph, image, and hypothesis functions: `analyze_mask`, `build_skeleton_graph`, `covering_walk`, `graph_from_mask`, `graph_from_skeleton`, `prune_spurs`, `rank_covering_walks`, and `stroke_hypotheses_from_analysis`.
 - Route functions: `prepare_topology_paths`, `rank_paths`, and `select_path`.
 
@@ -201,7 +203,7 @@ SkeletonPaths owns raster connectivity, graph construction, route enumeration, a
 
 SkeletonPaths was extracted and adapted from InkGrammar. It has no InkGrammar runtime dependency and is intended for general raster-skeleton topology, not handwriting-specific behavior.
 
-The package is pre-1.0. Public API changes may occur in minor releases while these contracts mature. Versions are derived from Git tags with `setuptools-scm`; tag releases with names such as `v0.1.0`. Source builds outside a Git checkout use the configured development fallback version.
+The package is pre-1.0, so behaviorally significant topology changes belong in a new minor release line, for example `0.2.x`. This upgrade contracts raw junction-pixel clusters into semantic regions and changes graph topology; graph-local edge IDs are implementation identifiers and are not stable across topology-model upgrades. Versions are derived from Git tags with `setuptools-scm`; tag releases with names such as `v0.1.0`. Source builds outside a Git checkout use the configured development fallback version.
 
 ## Development checks
 

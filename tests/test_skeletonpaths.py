@@ -694,7 +694,7 @@ def _draw_segments(segments):
         ([((1, 4), (4, 4)), ((4, 1), (4, 7))], (3, 1, 0)),
         ([((1, 1), (7, 7)), ((1, 7), (7, 1))], (4, 1, 0)),
         ([((1, 4), (4, 4)), ((4, 4), (7, 1)), ((4, 4), (7, 7))], (3, 1, 0)),
-        ([((4, 1), (4, 8)), ((1, 4), (4, 4)), ((4, 5), (7, 5))], (4, 2, 0)),
+        ([((4, 1), (4, 8)), ((1, 4), (4, 4)), ((4, 5), (7, 5))], (4, 1, 0)),
         (
             [
                 ((1, 3), (4, 3)),
@@ -706,7 +706,7 @@ def _draw_segments(segments):
                 ((3, 4), (3, 7)),
                 ((4, 4), (4, 7)),
             ],
-            (0, 16, 11),
+            (0, 1, 4),
         ),
         ([((1, 1), (7, 7))], (2, 0, 0)),
         (
@@ -722,7 +722,7 @@ def _draw_segments(segments):
     ],
     ids=("T", "X", "Y", "adjacent-junctions", "2x2-junction", "diagonal", "loop-junction"),
 )
-def test_junction_motifs_retain_per_pixel_topology(segments, expected):
+def test_junction_motifs_use_semantic_regions(segments, expected):
     graph = graph_from_skeleton(_draw_segments(segments))
     assert (graph.endpoint_count, graph.junction_count, graph.cycle_count) == expected
 

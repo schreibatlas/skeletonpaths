@@ -66,16 +66,15 @@ def _components(graph: SkeletonGraph) -> tuple[tuple[tuple[int, ...], tuple[int,
     return tuple(components)
 
 
-def _incident_edges(graph: SkeletonGraph) -> dict[int, list[int]]:
+def _incident_edges(graph: SkeletonGraph) -> dict[int, list[tuple[int, str]]]:
     incident = {node.id: [] for node in graph.nodes}
     for edge_id, edge in enumerate(graph.edges):
-        if edge.a == edge.b:
-            continue
-        incident[edge.a].append(edge_id)
-        incident[edge.b].append(edge_id)
-    for edge_ids in incident.values():
-        edge_ids.sort()
+        incident[edge.a].append((edge_id, "a"))
+        incident[edge.b].append((edge_id, "b"))
+    for ports in incident.values():
+        ports.sort()
     return incident
+
 
 
 def _guide_arrays(guide_paths: Sequence[ArrayLike] | None) -> tuple[np.ndarray, ...]:
@@ -96,14 +95,18 @@ def _guide_arrays(guide_paths: Sequence[ArrayLike] | None) -> tuple[np.ndarray, 
     return tuple(guides)
 
 
-def _edge_outward_tangent(graph: SkeletonGraph, edge_id: int, node_id: int) -> np.ndarray:
+def _edge_outward_tangent(
+    graph: SkeletonGraph, port: tuple[int, str], node_id: int
+) -> np.ndarray:
+    edge_id, side = port
     edge = graph.edges[edge_id]
     tangent = unit_tangents(edge.xy)
-    if edge.a == node_id:
+    if side == "a" and edge.a == node_id:
         return tangent[0]
-    if edge.b == node_id:
+    if side == "b" and edge.b == node_id:
         return -tangent[-1]
-    raise ValueError("junction edge does not touch its node")
+    raise ValueError("junction port does not touch its node")
+
 
 
 def _guide_tangent_cost(
@@ -132,35 +135,38 @@ def _junction_options(
 ) -> tuple[tuple[JunctionPairing, ...], ...]:
     incident = _incident_edges(graph)
     junctions = [
-        (node_id, edge_ids) for node_id, edge_ids in sorted(incident.items()) if len(edge_ids) > 2
+        (node_id, ports) for node_id, ports in sorted(incident.items()) if len(ports) > 2
     ]
     if not junctions:
         return ((),)
 
     pairing_count = [0]
     options_by_node = []
-    for node_id, edge_ids in junctions:
-        tangent_by_edge = {
-            edge_id: _edge_outward_tangent(graph, edge_id, node_id) for edge_id in edge_ids
+    for node_id, ports in junctions:
+        tangent_by_port = {
+            port: _edge_outward_tangent(graph, port, node_id) for port in ports
         }
         candidates = []
 
         def enumerate_matchings(
-            remaining: tuple[int, ...],
-            pairs: tuple[tuple[int, int], ...],
+            remaining: tuple[tuple[int, str], ...],
+            pairs: tuple[tuple[tuple[int, str], tuple[int, str]], ...],
             *,
             node_id: int = node_id,
-            edge_ids: list[int] = edge_ids,
-            tangent_by_edge: dict[int, np.ndarray] = tangent_by_edge,
+            ports: list[tuple[int, str]] = ports,
+            tangent_by_port: dict[tuple[int, str], np.ndarray] = tangent_by_port,
             candidates: list[JunctionPairing] = candidates,
         ) -> None:
             _count_state(states, limits, "junction-pairing-generation")
             if not remaining:
-                paired = {edge for pair in pairs for edge in pair}
+                paired = {port for pair in pairs for port in pair}
+                unpaired_ports = tuple(port for port in ports if port not in paired)
+                edge_pairs = tuple((first[0], second[0]) for first, second in pairs)
+                unpaired_edges = tuple(sorted({port[0] for port in unpaired_ports}))
                 cost = 0.0
                 for first, second in pairs:
-                    first_tangent = tangent_by_edge[first]
-                    second_tangent = tangent_by_edge[second]
+                    first_tangent = tangent_by_port[first]
+                    second_tangent = tangent_by_port[second]
                     continuation = second_tangent - first_tangent
                     magnitude = float(np.linalg.norm(continuation))
                     continuation = continuation / magnitude if magnitude > 1e-12 else np.zeros(2)
@@ -168,9 +174,11 @@ def _junction_options(
                     cost += _guide_tangent_cost(graph, node_id, continuation, guides)
                 candidate = JunctionPairing(
                     node_id=node_id,
-                    pairs=pairs,
-                    unpaired_edges=tuple(edge for edge in edge_ids if edge not in paired),
+                    pairs=edge_pairs,
+                    unpaired_edges=unpaired_edges,
                     tangent_cost=max(0.0, cost),
+                    port_pairs=pairs,
+                    unpaired_ports=unpaired_ports,
                 )
                 candidates.append(candidate)
                 pairing_count[0] += 1
@@ -190,8 +198,10 @@ def _junction_options(
                 next_remaining = remaining[1:index] + remaining[index + 1 :]
                 enumerate_matchings(next_remaining, pairs + ((first, second),))
 
-        enumerate_matchings(tuple(edge_ids), ())
-        candidates.sort(key=lambda item: (item.tangent_cost, item.pairs, item.unpaired_edges))
+        enumerate_matchings(tuple(ports), ())
+        candidates.sort(
+            key=lambda item: (item.tangent_cost, item.pairs, item.port_pairs, item.unpaired_ports)
+        )
         options_by_node.append(tuple(candidates))
 
     combinations = []
@@ -217,24 +227,38 @@ def _junction_options(
     return tuple(combinations)
 
 
+
 def _transitions(
     graph: SkeletonGraph, pairings: tuple[JunctionPairing, ...]
-) -> dict[tuple[int, int], int]:
+) -> dict[tuple[int, tuple[int, str]], tuple[int, str]]:
     transitions = {}
-    for node_id, edge_ids in _incident_edges(graph).items():
-        if len(edge_ids) == 2:
-            first, second = edge_ids
+    for node_id, ports in _incident_edges(graph).items():
+        if len(ports) == 2:
+            first, second = ports
             transitions[node_id, first] = second
             transitions[node_id, second] = first
     for pairing in pairings:
-        for first, second in pairing.pairs:
+        if pairing.port_pairs:
+            port_pairs = pairing.port_pairs
+        else:
+            ports = _incident_edges(graph)[pairing.node_id]
+            port_by_edge = {port[0]: port for port in ports}
+            port_pairs = tuple(
+                (port_by_edge[first], port_by_edge[second])
+                for first, second in pairing.pairs
+            )
+        for first, second in port_pairs:
             transitions[pairing.node_id, first] = second
             transitions[pairing.node_id, second] = first
     return transitions
 
 
+
 def _walk_from_steps(
-    graph: SkeletonGraph, steps: tuple[tuple[int, int], ...], *, isolated_node: int | None = None
+    graph: SkeletonGraph,
+    steps: tuple[tuple[int, str], ...],
+    *,
+    isolated_node: int | None = None,
 ) -> SkeletonWalk:
     if not steps:
         if isolated_node is None:
@@ -253,25 +277,25 @@ def _walk_from_steps(
             length_px=0.0,
         )
 
-    start_node = steps[0][1]
+    first_edge_id, first_side = steps[0]
+    first_edge = graph.edges[first_edge_id]
+    start_node = first_edge.a if first_side == "a" else first_edge.b
     current = start_node
     coordinates = [np.asarray(next(node.xy for node in graph.nodes if node.id == current))]
     edge_ids = []
     directions = []
-    for edge_id, source in steps:
-        if source != current:
-            raise ValueError("walk steps are not connected")
+    for edge_id, source_side in steps:
         edge = graph.edges[edge_id]
-        if edge.a == current:
+        if source_side == "a" and edge.a == current:
             direction = "forward"
             current = edge.b
             points = edge.xy
-        elif edge.b == current:
+        elif source_side == "b" and edge.b == current:
             direction = "reverse"
             current = edge.a
             points = edge.xy[::-1]
         else:
-            raise ValueError("walk step edge is not incident to its source node")
+            raise ValueError("walk step port does not match the current graph node")
         coordinates.extend(points[1:])
         edge_ids.append(edge_id)
         directions.append(direction)
@@ -290,6 +314,7 @@ def _walk_from_steps(
     )
 
 
+
 def _decompose(
     graph: SkeletonGraph,
     pairings: tuple[JunctionPairing, ...],
@@ -297,37 +322,41 @@ def _decompose(
     states: list[int],
 ) -> tuple[SkeletonWalk, ...]:
     transitions = _transitions(graph, pairings)
+    incident = _incident_edges(graph)
     used: set[int] = set()
     walks = []
 
-    def trace(edge_id: int, source_node: int) -> SkeletonWalk:
+    def trace(edge_id: int, source_side: str) -> SkeletonWalk:
         steps = []
         current_edge = edge_id
-        current_node = source_node
+        current_side = source_side
         while current_edge not in used:
             _count_state(states, limits, "walk-decomposition")
-            steps.append((current_edge, current_node))
+            steps.append((current_edge, current_side))
             used.add(current_edge)
             edge = graph.edges[current_edge]
-            next_node = edge.b if edge.a == current_node else edge.a
-            following = transitions.get((next_node, current_edge))
-            if following is None or following in used:
+            if current_side == "a":
+                next_node, arrival_port = edge.b, (current_edge, "b")
+            else:
+                next_node, arrival_port = edge.a, (current_edge, "a")
+            following = transitions.get((next_node, arrival_port))
+            if following is None or following[0] in used:
                 break
-            current_edge, current_node = following, next_node
+            current_edge, current_side = following
         return _walk_from_steps(graph, tuple(steps))
 
-    start_sides = []
-    for edge_id, edge in enumerate(graph.edges):
-        for node_id in (edge.a, edge.b):
-            if (node_id, edge_id) not in transitions:
-                start_sides.append((node_id, edge_id))
-    for node_id, edge_id in sorted(start_sides):
+    start_sides = [
+        (node_id, edge_id, side)
+        for node_id, ports in incident.items()
+        for edge_id, side in ports
+        if (node_id, (edge_id, side)) not in transitions
+    ]
+    for _, edge_id, side in sorted(start_sides):
         if edge_id not in used:
-            walks.append(trace(edge_id, node_id))
-    for edge_id, edge in enumerate(graph.edges):
+            walks.append(trace(edge_id, side))
+    for edge_id in range(len(graph.edges)):
         if edge_id not in used:
-            walks.append(trace(edge_id, edge.a))
-    incident = _incident_edges(graph)
+            walks.append(trace(edge_id, "a"))
     for node_id in sorted(incident):
         if not incident[node_id]:
             walks.append(_walk_from_steps(graph, (), isolated_node=node_id))
@@ -349,11 +378,12 @@ def _single_walk_per_component(graph: SkeletonGraph) -> tuple[SkeletonWalk, ...]
             local_walk.edge_ids, local_walk.edge_directions, strict=True
         ):
             edge_id = edge_ids[local_edge_id]
-            edge = graph.edges[edge_id]
-            source = edge.a if direction == "forward" else edge.b
-            steps.append((edge_id, source))
+            source_side = "a" if direction == "forward" else "b"
+            steps.append((edge_id, source_side))
         walks.append(_walk_from_steps(graph, tuple(steps)))
     return tuple(walks)
+
+
 
 
 def _orient_walk(
@@ -482,7 +512,10 @@ def _rank_value(hypothesis: StrokeHypothesis, policy: StrokeSearchPolicy) -> flo
 
 def _signature(hypothesis: StrokeHypothesis) -> tuple[object, ...]:
     routes = tuple(sorted(tuple(sorted(walk.edge_ids)) for walk in hypothesis.walks))
-    pairings = tuple((pairing.node_id, pairing.pairs) for pairing in hypothesis.junction_pairings)
+    pairings = tuple(
+        (pairing.node_id, pairing.pairs, pairing.port_pairs, pairing.unpaired_ports)
+        for pairing in hypothesis.junction_pairings
+    )
     return routes, pairings
 
 

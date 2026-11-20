@@ -6,6 +6,12 @@ This page collects concise integration guarantees. See the {doc}`../guide/graph-
 
 Raster arrays use `[row, column]` indexing. Public geometry uses `(x, y) = (column, row)` in pixel units. Graph topology and edges are undirected evidence; deterministic node, edge, and endpoint storage order supports geometry assembly, not physical drawing order. `SkeletonPath` is a connected candidate route without repeated edge IDs. `SkeletonWalk` is an ordered traversal that may repeat edges to cover a connected graph.
 
+## Semantic junction regions
+
+`raw_junction_seed_count` counts skeleton pixels with raster degree greater than two before contraction. `junction_count` counts semantic `JunctionRegion` values, not raw pixels or traversal encounters. A region has one representative graph node, absorbed skeleton support, a local radius, confidence, and boundary ports. Semantic junction-node degree is its port count; a self-edge contributes two ports, and a graph walk may encounter the same region multiple times. Endpoint seeds are never absorbed. Mask analysis uses its source-mask radius map for bounded region growth; radius-free skeleton input uses conservative adjacent-seed contraction.
+
+`JunctionRegionOptions` configures contraction. Edge IDs are graph-local implementation identifiers and may change across topology-model upgrades.
+
 {class}`skeletonpaths.SkeletonGraph` `cycle_count` is graph-level. {class}`skeletonpaths.TopologyRoute` and {class}`skeletonpaths.SkeletonPath` `cycle_count` values are route-level. `expected_cycles` constrains the route being considered, not every component of the graph.
 
 ## Immutability

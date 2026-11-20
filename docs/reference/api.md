@@ -106,6 +106,17 @@ The package root, `skeletonpaths`, is the supported import surface. The explicit
 
 
 ```{eval-rst}
+.. autoclass:: skeletonpaths.JunctionRegion
+   :members:
+```
+
+```{eval-rst}
+.. autoclass:: skeletonpaths.JunctionRegionOptions
+   :members:
+```
+
+
+```{eval-rst}
 .. autoclass:: skeletonpaths.SkeletonAnalysis
 ```
 

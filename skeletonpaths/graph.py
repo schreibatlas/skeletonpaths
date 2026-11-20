@@ -1,10 +1,18 @@
 from collections import deque
+from heapq import heappop, heappush
 from math import hypot
 
 import numpy as np
 from numpy.typing import ArrayLike
 
-from .model import Pixel, SkeletonEdge, SkeletonGraph, SkeletonNode
+from .model import (
+    JunctionRegion,
+    JunctionRegionOptions,
+    Pixel,
+    SkeletonEdge,
+    SkeletonGraph,
+    SkeletonNode,
+)
 
 
 def _pixel_adjacency(skeleton: np.ndarray) -> dict[Pixel, tuple[Pixel, ...]]:
@@ -135,12 +143,197 @@ def _radius_and_confidence(
     return radius, float(confidence_map[row, column])
 
 
+def _junction_region_supports(
+    seeds: list[Pixel],
+    adjacency: dict[Pixel, tuple[Pixel, ...]],
+    degrees: dict[Pixel, int],
+    radius_map: np.ndarray | None,
+    options: JunctionRegionOptions,
+) -> list[set[Pixel]]:
+    if not options.enabled or not seeds:
+        return []
+
+    seed_indices = {seed: index for index, seed in enumerate(seeds)}
+    parent = list(range(len(seeds)))
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def union(first: int, second: int) -> None:
+        first_root, second_root = find(first), find(second)
+        if first_root != second_root:
+            parent[max(first_root, second_root)] = min(first_root, second_root)
+
+    endpoints = {pixel for pixel, degree in degrees.items() if degree == 1}
+    if radius_map is None:
+        connecting_paths = []
+        for seed_index, seed in enumerate(seeds):
+            frontier = [(seed, (seed,))]
+            for _ in range(2):
+                following = []
+                for pixel, path in frontier:
+                    for neighbor in adjacency[pixel]:
+                        if neighbor in endpoints or neighbor in path:
+                            continue
+                        next_path = (*path, neighbor)
+                        neighbor_index = seed_indices.get(neighbor)
+                        if neighbor_index is not None and neighbor_index > seed_index:
+                            union(seed_index, neighbor_index)
+                            connecting_paths.append(next_path)
+                        following.append((neighbor, next_path))
+                frontier = following
+        groups: dict[int, set[Pixel]] = {}
+        for index, seed in enumerate(seeds):
+            groups.setdefault(find(index), set()).add(seed)
+        for path in connecting_paths:
+            groups[find(seed_indices[path[0]])].update(path)
+        return [groups[root] for root in sorted(groups)]
+
+    neighborhoods: list[set[Pixel]] = []
+    for seed in seeds:
+        row, column = seed
+        merge_radius = max(
+            options.minimum_merge_radius_px,
+            options.merge_radius_factor * float(radius_map[row, column]),
+        )
+        if options.maximum_merge_radius_px is not None:
+            merge_radius = min(merge_radius, options.maximum_merge_radius_px)
+        distances = {seed: 0.0}
+        frontier = [(0.0, seed)]
+        while frontier:
+            distance, pixel = heappop(frontier)
+            if distance > distances[pixel]:
+                continue
+            for neighbor in adjacency[pixel]:
+                if neighbor in endpoints:
+                    continue
+                step = hypot(neighbor[0] - pixel[0], neighbor[1] - pixel[1])
+                next_distance = distance + step
+                if (
+                    next_distance > merge_radius
+                    or next_distance >= distances.get(neighbor, float("inf"))
+                ):
+                    continue
+                distances[neighbor] = next_distance
+                heappush(frontier, (next_distance, neighbor))
+        neighborhoods.append(set(distances))
+
+    owners: dict[Pixel, list[int]] = {}
+    for index, neighborhood in enumerate(neighborhoods):
+        for pixel in sorted(neighborhood):
+            for other in owners.get(pixel, ()):
+                union(index, other)
+            owners.setdefault(pixel, []).append(index)
+
+    groups: dict[int, set[Pixel]] = {}
+    for index, neighborhood in enumerate(neighborhoods):
+        groups.setdefault(find(index), set()).update(neighborhood)
+    return [groups[root] for root in sorted(groups)]
+
+
+def _region_representative(
+    support: set[Pixel], radius_map: np.ndarray | None, method: str
+) -> tuple[Pixel, float]:
+    pixels = sorted(support)
+    points = np.asarray(pixels, dtype=float)
+    if radius_map is None:
+        radii = np.zeros(len(pixels), dtype=float)
+    else:
+        radii = np.asarray([radius_map[row, column] for row, column in pixels], dtype=float)
+    weights = radii if float(radii.sum()) > 0.0 else np.ones(len(pixels), dtype=float)
+    if method == "radius-weighted-centroid":
+        center = np.average(points, axis=0, weights=weights)
+        distances = np.sum((points - center) ** 2, axis=1)
+    else:
+        distances = np.asarray(
+            [np.sum(np.linalg.norm(points - point, axis=1) * weights) for point in points]
+        )
+    representative = pixels[int(np.argmin(distances))]
+    local_radius = float(np.average(radii, weights=weights)) if len(radii) else 0.0
+    return representative, local_radius
+
+
+def _trace_graph_edges(
+    node_supports: list[set[Pixel]],
+    node_pixels: list[Pixel],
+    adjacency: dict[Pixel, tuple[Pixel, ...]],
+    radius_map: np.ndarray | None,
+    confidence_map: np.ndarray,
+) -> tuple[list[SkeletonEdge], list[set[tuple[Pixel, Pixel]]]]:
+    support_owner = {
+        pixel: node_id
+        for node_id, support in enumerate(node_supports)
+        for pixel in support
+    }
+    ports: list[set[tuple[Pixel, Pixel]]] = [set() for _ in node_supports]
+    for node_id, support in enumerate(node_supports):
+        for pixel in sorted(support):
+            for neighbor in adjacency[pixel]:
+                if support_owner.get(neighbor) != node_id:
+                    ports[node_id].add((pixel, neighbor))
+
+    visited: set[frozenset[Pixel]] = set()
+    edges = []
+    for start_node, node_ports in enumerate(ports):
+        for inside, outside in sorted(node_ports):
+            first_key = frozenset((inside, outside))
+            if first_key in visited:
+                continue
+            chain = [inside, outside]
+            visited.add(first_key)
+            previous, current = inside, outside
+            while current not in support_owner:
+                following_pixels = [pixel for pixel in adjacency[current] if pixel != previous]
+                if len(following_pixels) != 1:
+                    break
+                following = following_pixels[0]
+                key = frozenset((current, following))
+                if key in visited:
+                    break
+                visited.add(key)
+                chain.append(following)
+                previous, current = current, following
+            end_node = support_owner.get(current)
+            if end_node is None:
+                continue
+            xy = np.asarray(
+                [
+                    (float(node_pixels[start_node][1]), float(node_pixels[start_node][0])),
+                    *[(float(column), float(row)) for row, column in chain[1:-1]],
+                    (float(node_pixels[end_node][1]), float(node_pixels[end_node][0])),
+                ],
+                dtype=float,
+            )
+            length = float(np.linalg.norm(np.diff(xy, axis=0), axis=1).sum())
+            radius_values = [
+                _radius_and_confidence(pixel, radius_map, confidence_map)[0] for pixel in chain
+            ]
+            confidence_values = [
+                _radius_and_confidence(pixel, radius_map, confidence_map)[1] for pixel in chain
+            ]
+            edges.append(
+                SkeletonEdge(
+                    a=start_node,
+                    b=end_node,
+                    xy=xy,
+                    length_px=length,
+                    mean_radius_px=float(np.mean(radius_values)),
+                    confidence=float(np.mean(confidence_values)),
+                )
+            )
+    return edges, ports
+
+
 def build_skeleton_graph(
     observed_ink: ArrayLike,
     *,
     min_spur_length_px: float = 0.0,
     radius: ArrayLike | None = None,
     confidence: ArrayLike | None = None,
+    junction_options: JunctionRegionOptions | None = None,
     already_skeleton: bool = False,
 ) -> SkeletonGraph:
     """Build a graph from observed ink or an already-thinned skeleton.
@@ -185,6 +378,8 @@ def build_skeleton_graph(
     when neither orthogonal bridge pixel is foreground.
     """
     ink = _binary_image(observed_ink, name="observed ink")
+    if junction_options is not None and not isinstance(junction_options, JunctionRegionOptions):
+        raise TypeError("junction_options must be JunctionRegionOptions")
     if radius is not None:
         radius = np.asarray(radius, dtype=float)
         if radius.shape != ink.shape or not np.isfinite(radius).all() or np.any(radius < 0.0):
@@ -214,70 +409,76 @@ def build_skeleton_graph(
     adjacency = _pixel_adjacency(thin)
     degrees = {pixel: len(neighbors) for pixel, neighbors in adjacency.items()}
     components = _components(adjacency)
-    node_pixels = {pixel for pixel, degree in degrees.items() if degree != 2}
-    for component in components:
-        if component and all(degrees[pixel] == 2 for pixel in component):
-            node_pixels.add(min(component))
+    junction_options = junction_options or JunctionRegionOptions()
+    raw_seeds = sorted(pixel for pixel, degree in degrees.items() if degree > 2)
+    region_supports = _junction_region_supports(
+        raw_seeds, adjacency, degrees, radius, junction_options
+    )
+    region_specs = []
+    for support in region_supports:
+        representative, region_radius = _region_representative(
+            support, radius, junction_options.representative
+        )
+        region_confidence = float(
+            np.mean([confidence_map[row, column] for row, column in sorted(support)])
+        )
+        region_specs.append((representative, support, True, region_radius, region_confidence))
 
-    ordered_nodes = sorted(node_pixels)
-    node_ids = {pixel: index for index, pixel in enumerate(ordered_nodes)}
+    absorbed = set().union(*(support for support in region_supports)) if region_supports else set()
+    node_specs = list(region_specs)
+    for pixel, degree in sorted(degrees.items()):
+        if degree != 2 and pixel not in absorbed:
+            node_specs.append((pixel, {pixel}, False, 0.0, 0.0))
+
+    for component in components:
+        if not any(pixel in absorbed or degrees[pixel] != 2 for pixel in component):
+            anchor = min(component)
+            node_specs.append((anchor, {anchor}, False, 0.0, 0.0))
+
+    node_specs.sort(key=lambda item: (item[0], not item[2]))
+    node_pixels = [spec[0] for spec in node_specs]
+    node_supports = [spec[1] for spec in node_specs]
+    edges, ports = _trace_graph_edges(
+        node_supports, node_pixels, adjacency, radius, confidence_map
+    )
+
     nodes = []
-    for pixel in ordered_nodes:
-        radius_value, confidence_value = _radius_and_confidence(pixel, radius, confidence_map)
+    junction_regions = []
+    for node_id, (pixel, support, is_region, region_radius, region_confidence) in enumerate(
+        node_specs
+    ):
+        if is_region:
+            radius_value = region_radius
+            confidence_value = region_confidence
+            port_count = len(ports[node_id])
+            junction_regions.append(
+                JunctionRegion(
+                    node_id=node_id,
+                    xy=(float(pixel[1]), float(pixel[0])),
+                    radius_px=radius_value,
+                    support_pixels=tuple(sorted(support)),
+                    port_count=port_count,
+                    confidence=confidence_value,
+                )
+            )
+        else:
+            radius_value, confidence_value = _radius_and_confidence(
+                pixel, radius, confidence_map
+            )
+            port_count = len(ports[node_id])
         nodes.append(
             SkeletonNode(
-                id=node_ids[pixel],
+                id=node_id,
                 xy=(float(pixel[1]), float(pixel[0])),
-                degree=degrees[pixel],
+                degree=port_count,
                 radius_px=radius_value,
                 confidence=confidence_value,
             )
         )
 
-    visited: set[frozenset[Pixel]] = set()
-    edges = []
-    for start in ordered_nodes:
-        for neighbor in adjacency[start]:
-            first_key = frozenset((start, neighbor))
-            if first_key in visited:
-                continue
-            chain = [start, neighbor]
-            visited.add(first_key)
-            previous, current = start, neighbor
-            while current not in node_pixels:
-                following_pixels = [pixel for pixel in adjacency[current] if pixel != previous]
-                if len(following_pixels) != 1:
-                    break
-                following = following_pixels[0]
-                key = frozenset((current, following))
-                if key in visited:
-                    break
-                visited.add(key)
-                chain.append(following)
-                previous, current = current, following
-            if current not in node_ids:
-                continue
-            xy = np.asarray([(column, row) for row, column in chain], dtype=float)
-            length = float(np.linalg.norm(np.diff(xy, axis=0), axis=1).sum())
-            radius_values = [
-                _radius_and_confidence(pixel, radius, confidence_map)[0] for pixel in chain
-            ]
-            confidence_values = [
-                _radius_and_confidence(pixel, radius, confidence_map)[1] for pixel in chain
-            ]
-            edges.append(
-                SkeletonEdge(
-                    a=node_ids[start],
-                    b=node_ids[current],
-                    xy=xy,
-                    length_px=length,
-                    mean_radius_px=float(np.mean(radius_values)),
-                    confidence=float(np.mean(confidence_values)),
-                )
-            )
-
-    return SkeletonGraph(tuple(nodes), tuple(edges))
-
+    return SkeletonGraph(
+        tuple(nodes), tuple(edges), tuple(junction_regions), raw_junction_seed_count=len(raw_seeds)
+    )
 
 def graph_from_skeleton(
     skeleton: ArrayLike,
@@ -285,6 +486,7 @@ def graph_from_skeleton(
     min_spur_length: float = 0.0,
     radius: ArrayLike | None = None,
     confidence: ArrayLike | None = None,
+    junction_options: JunctionRegionOptions | None = None,
 ) -> SkeletonGraph:
     """Build a graph from an already-thinned binary skeleton.
 
@@ -330,5 +532,6 @@ def graph_from_skeleton(
         min_spur_length_px=min_spur_length,
         radius=radius,
         confidence=confidence,
+        junction_options=junction_options,
         already_skeleton=True,
     )
