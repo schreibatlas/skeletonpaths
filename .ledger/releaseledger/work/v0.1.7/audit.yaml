@@ -1,0 +1,35 @@
+schema_version: 1
+object_type: commit_audit_sheet
+versioning:
+  schema_version: 1
+  revision: 1
+release_version: v0.1.7
+git_base_ref: v0.1.6
+git_base_sha: 36d6a67c3d5279f81d8e6780e59b4e401c34c66f
+git_head_ref: HEAD
+git_head_sha: cbb6d272e1bc89644d7114692dcf075a532533f5
+git_range: 36d6a67c3d5279f81d8e6780e59b4e401c34c66f..cbb6d272e1bc89644d7114692dcf075a532533f5
+commit_count: 1
+rows:
+- sha: cbb6d272e1bc89644d7114692dcf075a532533f5
+  source_ref: git:cbb6d272e1bc89644d7114692dcf075a532533f5
+  short_sha: cbb6d27
+  changed_paths:
+  - README.md
+  - docs/reference/api.md
+  - skeletonpaths/__init__.py
+  - skeletonpaths/core.py
+  - skeletonpaths/hypotheses.py
+  - skeletonpaths/model.py
+  - tests/test_stroke_search_limits.py
+  stats:
+    files_changed: 7
+    insertions: 380
+    deletions: 59
+  inspected: false
+  inspected_paths: []
+  observed_behavior: ''
+  public_impact: unknown
+  decision: needs_review
+  stale: false
+  evidence_subject: 'feat: better hypotheses testing'

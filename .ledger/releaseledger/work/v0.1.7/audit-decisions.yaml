@@ -1,0 +1,18 @@
+rows:
+- sha: cbb6d272e1bc89644d7114692dcf075a532533f5
+  inspected: true
+  inspected_paths:
+  - README.md
+  - docs/reference/api.md
+  - skeletonpaths/__init__.py
+  - skeletonpaths/core.py
+  - skeletonpaths/hypotheses.py
+  - skeletonpaths/model.py
+  - tests/test_stroke_search_limits.py
+  observed_behavior: Added opt-in truncating mode for stroke hypothesis searches, bounded local junction pairing and cross-junction combination work, and exposed deterministic search diagnostics through the package API.
+  public_impact: public
+  decision: accepted
+  target_entry_key: null
+  target_entry_id: null
+  notes: ''
+  stale: false

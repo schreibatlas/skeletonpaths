@@ -1,0 +1,30 @@
+schema: releaseledger.entry-batch.v1
+operation: create
+schema_version: 1
+object_type: release_entry_batch
+release_version: v0.1.7
+git_base_ref: 36d6a67c3d5279f81d8e6780e59b4e401c34c66f
+git_base_sha: 36d6a67c3d5279f81d8e6780e59b4e401c34c66f
+git_head_ref: cbb6d272e1bc89644d7114692dcf075a532533f5
+git_head_sha: cbb6d272e1bc89644d7114692dcf075a532533f5
+include_merges: nontrivial
+entries:
+- kind: added
+  summary: Added opt-in bounded stroke-hypothesis search with deterministic fallback results and diagnostics for truncation causes
+  status: accepted
+  source_refs:
+  - git:cbb6d272e1bc89644d7114692dcf075a532533f5
+  paths:
+  - README.md
+  - docs/reference/api.md
+  - skeletonpaths/__init__.py
+  - skeletonpaths/core.py
+  - skeletonpaths/hypotheses.py
+  - skeletonpaths/model.py
+  - tests/test_stroke_search_limits.py
+  sources:
+  - git:cbb6d272e1bc89644d7114692dcf075a532533f5
+  prs: []
+  issues: []
+  contributors:
+  - '@holgern'
