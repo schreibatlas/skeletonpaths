@@ -161,7 +161,10 @@ When either search limit is exceeded, `PathSearchLimitError` is raised rather th
 
 Each `StrokeHypothesisScore` preserves coverage error, uncovered length, repeat length, turning cost, junction pairing cost, lift cost, guide distance, and cycle error separately. `StrokeSearchPolicy` configures their ranking penalties. `JunctionPairing` candidates use local tangents and optional guides to rank alternatives without asserting which pairing is physically true. Disconnected components produce separate walks and set `component_order_ambiguous` because their temporal ordering is unavailable from the raster.
 
-A repeat is evidence about a hypothesis only. `repeat_required_by_hypothesis` never means that the source was observed to be retraced. Orientation flags and component ordering likewise describe ambiguity in candidate explanations, not recovered history. If the requested result `limit` omits lower-ranked candidates, each returned hypothesis sets `truncated=True`.
+A repeat is evidence about a hypothesis only. `repeat_required_by_hypothesis` never means that the source was observed to be retraced. Orientation flags and component ordering likewise describe ambiguity in candidate explanations, not recovered history. If the requested result `limit` omits lower-ranked candidates, each returned hypothesis sets `truncated=True`. Search truncation is also reported through `search_diagnostics`, which distinguishes result-limit, local-junction, junction-combination, and state-budget truncation. These hypotheses are bounded evidence, not a claim that omitted search space was exhausted.
+
+
+`rank_covering_walks(..., on_limit="raise")` and `stroke_hypotheses_from_analysis(..., on_limit="raise")` preserve strict hard-limit behavior by default. Pass `on_limit="truncate"` to stop local pairing or cross-junction expansion at the configured work budget or the limit-derived target `max(16, 4 * limit)`, whichever is smaller, and return the best available hypotheses, including the deterministic baseline. `StrokeSearchDiagnostics` provides the truncation reasons, explored-state count, generated local pairing and combination counts, and junction degrees. `max_pairings_per_junction` and `max_junction_combinations` tune the two combinatorial budgets; when omitted, both inherit `max_junction_pairings` for compatibility.
 
 
 `diversity="none"` preserves legacy global ranking. Opt into `diversity="stroke-count"` to retain the best full-coverage candidate for each stroke-count family, including the minimum-stroke candidate, before filling remaining slots by global rank. Scores and search limits are unchanged. This is candidate preservation, not a handwriting-semantic selection or a claim that any route is historically correct.
@@ -177,7 +180,9 @@ A repeat is evidence about a hypothesis only. `repeat_required_by_hypothesis` ne
 | `max_walk_steps` | 10,000 | Traversal steps scored in a hypothesis |
 | `max_repeated_edges` | 8 | Repeated edge traversals in a hypothesis |
 | `max_strokes` | 64 | Walks accepted in one hypothesis |
-| `max_junction_pairings` | 1,000 | Pairing candidates and combinations |
+| `max_junction_pairings` | 1,000 | Compatibility default for local and combination budgets |
+| `max_pairings_per_junction` | inherited | Local pairing candidates generated per junction |
+| `max_junction_combinations` | inherited | Cross-junction combinations generated |
 
 `StrokeSearchLimitError` and `JunctionPairingLimitError` report the limit name, configured value, observed value, and search stage. PlanarCurve provides guide distance, arc-length, tangent, turn, and directed trajectory descriptor calculations.
 
@@ -188,7 +193,7 @@ Run the complete example with `python examples/11_stroke_hypotheses.py` after in
 The supported package-root exports are:
 
 - Constants: `DEFAULT_MAX_PATHS`, `DEFAULT_RANKING_POLICY`, `DEFAULT_SEARCH_LIMITS`, `DEFAULT_STROKE_SEARCH_LIMITS`, `DEFAULT_STROKE_SEARCH_POLICY`, and `__version__`.
-- Models and errors: `DisconnectedGraphError`, `JunctionPairing`, `JunctionPairingLimitError`, `JunctionRegion`, `JunctionRegionOptions`, `NoFeasiblePathError`, path scoring and limit types, `RouteStep`, `SkeletonAnalysis`, graph/image/path/walk models, `StrokeHypothesis`, `StrokeHypothesisScore`, `StrokeSearchLimitError`, `StrokeSearchLimits`, `StrokeSearchPolicy`, `TopologyPathInventory`, and `TopologyRoute`.
+- Models and errors: `DisconnectedGraphError`, `JunctionPairing`, `JunctionPairingLimitError`, `JunctionRegion`, `JunctionRegionOptions`, `NoFeasiblePathError`, path scoring and limit types, `RouteStep`, `SkeletonAnalysis`, graph/image/path/walk models, `StrokeHypothesis`, `StrokeHypothesisScore`, `StrokeSearchDiagnostics`, `StrokeSearchLimitError`, `StrokeSearchLimits`, `StrokeSearchPolicy`, `TopologyPathInventory`, and `TopologyRoute`.
 - Graph, image, and hypothesis functions: `analyze_mask`, `build_skeleton_graph`, `covering_walk`, `graph_from_mask`, `graph_from_skeleton`, `prune_spurs`, `orientation_variants`, `rank_covering_walks`, and `stroke_hypotheses_from_analysis`.
 - Route functions: `prepare_topology_paths`, `rank_paths`, and `select_path`.
 

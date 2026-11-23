@@ -36,6 +36,9 @@ The package root, `skeletonpaths`, is the supported import surface. The explicit
 .. autofunction:: skeletonpaths.rank_covering_walks
 ```
 
+
+`rank_covering_walks` and `stroke_hypotheses_from_analysis` default to strict overflow behavior. Set `on_limit="truncate"` to stop bounded junction exploration and retain available route hypotheses, including the deterministic baseline. Inspect each result's `search_diagnostics` for truncation reasons and work counters. The `max_pairings_per_junction` and `max_junction_combinations` limits control local and cross-junction work; both default to `max_junction_pairings` when unspecified. In truncating mode, actual local and combination work is additionally capped at `max(16, 4 * limit)`.
+
 ```{eval-rst}
 .. autofunction:: skeletonpaths.stroke_hypotheses_from_analysis
 ```
@@ -188,6 +191,12 @@ The package root, `skeletonpaths`, is the supported import surface. The explicit
 .. autoclass:: skeletonpaths.StrokeSearchLimits
 ```
 
+
+
+```{eval-rst}
+.. autoclass:: skeletonpaths.StrokeSearchDiagnostics
+   :members:
+```
 ```{eval-rst}
 .. autoclass:: skeletonpaths.StrokeSearchPolicy
    :members:

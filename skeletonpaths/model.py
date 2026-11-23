@@ -664,6 +664,9 @@ class StrokeSearchLimits:
     max_strokes: int = 64
     max_junction_pairings: int = 1_000
 
+    max_pairings_per_junction: int | None = None
+    max_junction_combinations: int | None = None
+
     def __post_init__(self) -> None:
         for name in (
             "max_states",
@@ -680,6 +683,13 @@ class StrokeSearchLimits:
         if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or value < 0:
             raise ValueError("max_repeated_edges must be a nonnegative integer")
         object.__setattr__(self, "max_repeated_edges", int(value))
+
+        for name in ("max_pairings_per_junction", "max_junction_combinations"):
+            value = getattr(self, name)
+            if value is not None:
+                if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or value < 1:
+                    raise ValueError(f"{name} must be a positive integer")
+                object.__setattr__(self, name, int(value))
 
 
 @dataclass(frozen=True)
@@ -842,13 +852,51 @@ class StrokeHypothesisScore:
 
 
 @dataclass(frozen=True)
+class StrokeSearchDiagnostics:
+    """Stable work counters and truncation reasons for one route search."""
+
+    truncated: bool = False
+    truncation_reasons: tuple[str, ...] = ()
+    explored_states: int = 0
+    generated_local_pairings: int = 0
+    generated_combinations: int = 0
+    junction_port_counts: tuple[int, ...] = ()
+    maximum_junction_degree: int = 0
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.truncated, bool):
+            raise TypeError("truncated must be a bool")
+        reasons = tuple(self.truncation_reasons)
+        if any(not isinstance(reason, str) or not reason for reason in reasons):
+            raise ValueError("truncation reasons must be nonempty strings")
+        counts = (
+            self.explored_states,
+            self.generated_local_pairings,
+            self.generated_combinations,
+            self.maximum_junction_degree,
+            *self.junction_port_counts,
+        )
+        if any(
+            isinstance(value, bool) or not isinstance(value, (int, np.integer)) or value < 0
+            for value in counts
+        ):
+            raise ValueError("search diagnostic counts must be nonnegative integers")
+        object.__setattr__(self, "truncation_reasons", tuple(sorted(set(reasons))))
+        object.__setattr__(self, "explored_states", int(self.explored_states))
+        object.__setattr__(self, "generated_local_pairings", int(self.generated_local_pairings))
+        object.__setattr__(self, "generated_combinations", int(self.generated_combinations))
+        object.__setattr__(self, "junction_port_counts", tuple(map(int, self.junction_port_counts)))
+        object.__setattr__(self, "maximum_junction_degree", int(self.maximum_junction_degree))
+
+
+@dataclass(frozen=True)
 class StrokeHypothesis:
     """A scored explanation of graph edges as one or more traversal walks.
 
     ``walks`` are topology alternatives, not observed physical strokes. The
     coverage and repeat fields summarize their edge evidence. Ambiguity flags
     describe competing routes, orientations, and component orders; ``truncated``
-    means lower-ranked candidates were omitted by the requested result limit.
+    marks omitted work or hypotheses, with the cause recorded in ``search_diagnostics``.
     """
 
     walks: tuple[SkeletonWalk, ...]
@@ -865,6 +913,7 @@ class StrokeHypothesis:
     repeat_required_by_hypothesis: bool = False
     truncated: bool = False
     orientation_relation: Literal["as-supplied", "global-reversal"] = "as-supplied"
+    search_diagnostics: StrokeSearchDiagnostics | None = None
 
     def __post_init__(self) -> None:
         walks = tuple(self.walks)
@@ -889,6 +938,10 @@ class StrokeHypothesis:
             raise ValueError("pen-lift count must equal the number of transitions between walks")
         if not isinstance(self.score, StrokeHypothesisScore):
             raise TypeError("hypothesis score must be a StrokeHypothesisScore")
+        if self.search_diagnostics is not None and not isinstance(
+            self.search_diagnostics, StrokeSearchDiagnostics
+        ):
+            raise TypeError("search_diagnostics must be StrokeSearchDiagnostics or None")
         for name in ("route_ambiguous", "orientation_ambiguous", "component_order_ambiguous"):
             if not isinstance(getattr(self, name), bool):
                 raise TypeError(f"{name} must be bool")

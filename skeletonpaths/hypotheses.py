@@ -24,6 +24,7 @@ from .model import (
     SkeletonWalk,
     StrokeHypothesis,
     StrokeHypothesisScore,
+    StrokeSearchDiagnostics,
     StrokeSearchLimitError,
     StrokeSearchLimits,
     StrokeSearchPolicy,
@@ -129,17 +130,37 @@ def _junction_options(
     guides: tuple[np.ndarray, ...],
     limits: StrokeSearchLimits,
     states: list[int],
+    *,
+    on_limit: Literal["raise", "truncate"] = "raise",
+    target: int = 5,
+    diagnostics: dict[str, object] | None = None,
 ) -> tuple[tuple[JunctionPairing, ...], ...]:
     incident = _incident_edges(graph)
     junctions = [(node_id, ports) for node_id, ports in sorted(incident.items()) if len(ports) > 2]
+    if diagnostics is not None:
+        diagnostics["junction_port_counts"] = tuple(len(ports) for _, ports in junctions)
     if not junctions:
         return ((),)
 
-    pairing_count = [0]
+    stats = diagnostics if diagnostics is not None else {}
+    local_budget = int(limits.max_pairings_per_junction or limits.max_junction_pairings)
+    legacy_budget = (
+        limits.max_junction_pairings if limits.max_pairings_per_junction is None else None
+    )
+    if on_limit == "truncate":
+        target_budget = max(16, 4 * target)
+        local_budget = min(local_budget, target_budget)
+        if legacy_budget is not None:
+            legacy_budget = min(legacy_budget, target_budget)
+    total_pairings = 0
+    family_limit = max(16, 4 * target)
     options_by_node = []
+
     for node_id, ports in junctions:
+        pairing_count = 0
         tangent_by_port = {port: _edge_outward_tangent(graph, port, node_id) for port in ports}
-        candidates = []
+        candidates: list[JunctionPairing] = []
+        stopped = False
 
         def enumerate_matchings(
             remaining: tuple[tuple[int, str], ...],
@@ -150,8 +171,26 @@ def _junction_options(
             tangent_by_port: dict[tuple[int, str], np.ndarray] = tangent_by_port,
             candidates: list[JunctionPairing] = candidates,
         ) -> None:
+            nonlocal pairing_count, stopped, total_pairings
+            if stopped:
+                return
             _count_state(states, limits, "junction-pairing-generation")
+            stats["explored_states"] = states[0]
             if not remaining:
+                legacy_exhausted = legacy_budget is not None and total_pairings >= legacy_budget
+                if pairing_count >= local_budget or legacy_exhausted:
+                    if on_limit == "raise":
+                        configured = legacy_budget if legacy_exhausted else local_budget
+                        observed = total_pairings + 1 if legacy_exhausted else pairing_count + 1
+                        raise JunctionPairingLimitError(
+                            "max_junction_pairings",
+                            int(configured),
+                            observed,
+                            "junction-pairing-generation",
+                        )
+                    stats.setdefault("truncation_reasons", set()).add("local-junction-search")
+                    stopped = True
+                    return
                 paired = {port for pair in pairs for port in pair}
                 unpaired_ports = tuple(port for port in ports if port not in paired)
                 edge_pairs = tuple((first[0], second[0]) for first, second in pairs)
@@ -165,58 +204,93 @@ def _junction_options(
                     continuation = continuation / magnitude if magnitude > 1e-12 else np.zeros(2)
                     cost += 1.0 + float(np.dot(first_tangent, second_tangent))
                     cost += _guide_tangent_cost(graph, node_id, continuation, guides)
-                candidate = JunctionPairing(
-                    node_id=node_id,
-                    pairs=edge_pairs,
-                    unpaired_edges=unpaired_edges,
-                    tangent_cost=max(0.0, cost),
-                    port_pairs=pairs,
-                    unpaired_ports=unpaired_ports,
-                )
-                candidates.append(candidate)
-                pairing_count[0] += 1
-                if pairing_count[0] > limits.max_junction_pairings:
-                    raise JunctionPairingLimitError(
-                        "max_junction_pairings",
-                        limits.max_junction_pairings,
-                        pairing_count[0],
-                        "junction-pairing-generation",
+                candidates.append(
+                    JunctionPairing(
+                        node_id=node_id,
+                        pairs=edge_pairs,
+                        unpaired_edges=unpaired_edges,
+                        tangent_cost=max(0.0, cost),
+                        port_pairs=pairs,
+                        unpaired_ports=unpaired_ports,
                     )
+                )
+                pairing_count += 1
+                total_pairings += 1
+                stats["generated_local_pairings"] = (
+                    int(stats.get("generated_local_pairings", 0)) + 1
+                )
                 return
 
             first = remaining[0]
             enumerate_matchings(remaining[1:], pairs)
             for index in range(1, len(remaining)):
+                if stopped:
+                    return
                 second = remaining[index]
                 next_remaining = remaining[1:index] + remaining[index + 1 :]
                 enumerate_matchings(next_remaining, pairs + ((first, second),))
 
         enumerate_matchings(tuple(ports), ())
-        candidates.sort(
-            key=lambda item: (item.tangent_cost, item.pairs, item.port_pairs, item.unpaired_ports)
+        by_cardinality: dict[int, list[JunctionPairing]] = {}
+        for candidate in candidates:
+            by_cardinality.setdefault(len(candidate.port_pairs), []).append(candidate)
+        retained = []
+        for cardinality in sorted(by_cardinality):
+            family = sorted(
+                by_cardinality[cardinality],
+                key=lambda item: (item.tangent_cost, item.port_pairs, item.unpaired_ports),
+            )
+            retained.extend(family[:family_limit])
+        retained.sort(
+            key=lambda item: (
+                item.tangent_cost,
+                len(item.port_pairs),
+                item.port_pairs,
+                item.unpaired_ports,
+            )
         )
-        options_by_node.append(tuple(candidates))
+        options_by_node.append(tuple(retained))
 
+    import heapq
+
+    start = tuple(0 for _ in options_by_node)
+    heap = []
+    seen = {start}
+
+    def push(indices: tuple[int, ...]) -> None:
+        selected = tuple(options_by_node[i][index] for i, index in enumerate(indices))
+        cost = sum(option.tangent_cost for option in selected)
+        family = tuple(len(option.port_pairs) for option in selected)
+        heapq.heappush(heap, (cost, family, indices, selected))
+
+    push(start)
     combinations = []
-    combination_count = [0]
-
-    def combine(index: int, selected: tuple[JunctionPairing, ...]) -> None:
+    combination_budget = int(limits.max_junction_combinations or limits.max_junction_pairings)
+    if on_limit == "truncate":
+        combination_budget = min(combination_budget, max(16, 4 * target))
+    while heap and len(combinations) < combination_budget:
         _count_state(states, limits, "junction-pairing-combination")
-        if index == len(options_by_node):
-            combination_count[0] += 1
-            if combination_count[0] > limits.max_junction_pairings:
-                raise JunctionPairingLimitError(
-                    "max_junction_pairings",
-                    limits.max_junction_pairings,
-                    combination_count[0],
-                    "junction-pairing-combination",
-                )
-            combinations.append(selected)
-            return
-        for option in options_by_node[index]:
-            combine(index + 1, selected + (option,))
-
-    combine(0, ())
+        stats["explored_states"] = states[0]
+        _, _, indices, selected = heapq.heappop(heap)
+        combinations.append(selected)
+        stats["generated_combinations"] = len(combinations)
+        for axis in range(len(indices)):
+            neighbor = list(indices)
+            neighbor[axis] += 1
+            neighbor_tuple = tuple(neighbor)
+            if neighbor_tuple in seen or neighbor[axis] >= len(options_by_node[axis]):
+                continue
+            seen.add(neighbor_tuple)
+            push(neighbor_tuple)
+    if heap:
+        if on_limit == "raise":
+            raise JunctionPairingLimitError(
+                "max_junction_pairings",
+                combination_budget,
+                combination_budget + 1,
+                "junction-pairing-combination",
+            )
+        stats.setdefault("truncation_reasons", set()).add("junction-combination-search")
     return tuple(combinations)
 
 
@@ -562,6 +636,7 @@ def rank_covering_walks(
     guide_paths: Sequence[ArrayLike] | None = None,
     limits: StrokeSearchLimits | None = None,
     limit: int = 5,
+    on_limit: Literal["raise", "truncate"] = "raise",
     policy: StrokeSearchPolicy = DEFAULT_STROKE_SEARCH_POLICY,
     diversity: Literal["none", "stroke-count"] = "none",
 ) -> tuple[StrokeHypothesis, ...]:
@@ -578,6 +653,8 @@ def rank_covering_walks(
         limits = DEFAULT_STROKE_SEARCH_LIMITS
     if not isinstance(limits, StrokeSearchLimits):
         raise TypeError("limits must be a StrokeSearchLimits")
+    if on_limit not in ("raise", "truncate"):
+        raise ValueError("on_limit must be 'raise' or 'truncate'")
     if not isinstance(policy, StrokeSearchPolicy):
         raise TypeError("policy must be a StrokeSearchPolicy")
     if isinstance(limit, bool) or not isinstance(limit, (int, np.integer)) or limit < 1:
@@ -601,20 +678,67 @@ def rank_covering_walks(
     guides = _guide_arrays(guide_paths)
     guide_descriptors = tuple(trajectory_descriptor(guide, samples=32) for guide in guides)
     states = [0]
-    junction_choices = _junction_options(graph, guides, limits, states)
-    candidate_walks = [
-        (pairings, _decompose(graph, pairings, limits, states)) for pairings in junction_choices
-    ]
-    candidate_walks.append(((), _single_walk_per_component(graph)))
-
+    search_stats: dict[str, object] = {"truncation_reasons": set()}
+    baseline = _single_walk_per_component(graph)
+    try:
+        junction_choices = _junction_options(
+            graph,
+            guides,
+            limits,
+            states,
+            on_limit=on_limit,
+            target=int(limit),
+            diagnostics=search_stats,
+        )
+    except StrokeSearchLimitError as error:
+        if on_limit == "raise":
+            raise
+        search_stats["truncation_reasons"].add(
+            "state-budget" if error.limit_name == "max_states" else "junction-search-budget"
+        )
+        junction_choices = ()
+    candidate_walks = [((), baseline)]
+    for pairings in junction_choices:
+        try:
+            walks = _decompose(graph, pairings, limits, states)
+        except StrokeSearchLimitError as error:
+            if on_limit == "raise":
+                raise
+            search_stats["truncation_reasons"].add(
+                "state-budget" if error.limit_name == "max_states" else "junction-search-budget"
+            )
+            break
+        candidate_walks.append((pairings, walks))
     hypotheses = []
     signatures = set()
     for pairings, walks in candidate_walks:
-        _count_state(states, limits, "hypothesis-scoring")
+        if len(hypotheses) >= limits.max_hypotheses:
+            if on_limit == "raise":
+                raise StrokeSearchLimitError(
+                    "max_hypotheses",
+                    limits.max_hypotheses,
+                    limits.max_hypotheses + 1,
+                    "hypothesis-scoring",
+                )
+            search_stats["truncation_reasons"].add("hypothesis-budget")
+            break
+        if "state-budget" in search_stats["truncation_reasons"] and pairings:
+            break
+        try:
+            _count_state(states, limits, "hypothesis-scoring")
+        except StrokeSearchLimitError:
+            if on_limit == "raise":
+                raise
+            search_stats["truncation_reasons"].add("state-budget")
+            if pairings:
+                break
         if len(walks) > limits.max_strokes:
             continue
         step_count = sum(len(walk.edge_ids) for walk in walks)
         if step_count > limits.max_walk_steps:
+            if on_limit == "truncate":
+                search_stats["truncation_reasons"].add("walk-step-budget")
+                break
             raise StrokeSearchLimitError(
                 "max_walk_steps", limits.max_walk_steps, step_count, "hypothesis-scoring"
             )
@@ -636,13 +760,6 @@ def rank_covering_walks(
             continue
         signatures.add(signature)
         hypotheses.append(hypothesis)
-        if len(hypotheses) > limits.max_hypotheses:
-            raise StrokeSearchLimitError(
-                "max_hypotheses",
-                limits.max_hypotheses,
-                len(hypotheses),
-                "hypothesis-scoring",
-            )
 
     hypotheses.sort(
         key=lambda item: (
@@ -668,10 +785,25 @@ def rank_covering_walks(
             for other in hypotheses
         )
         marked.append(replace(hypothesis, route_ambiguous=ambiguous))
-    is_truncated = len(marked) > int(limit)
+    result_limit_truncated = len(marked) > int(limit)
+    reasons = set(search_stats["truncation_reasons"])
+    if result_limit_truncated:
+        reasons.add("result-limit")
+    diagnostic = StrokeSearchDiagnostics(
+        truncated=bool(reasons),
+        truncation_reasons=tuple(sorted(reasons)),
+        explored_states=int(search_stats.get("explored_states", states[0])),
+        generated_local_pairings=int(search_stats.get("generated_local_pairings", 0)),
+        generated_combinations=int(search_stats.get("generated_combinations", 0)),
+        junction_port_counts=tuple(search_stats.get("junction_port_counts", ())),
+        maximum_junction_degree=max(search_stats.get("junction_port_counts", ()), default=0),
+    )
     if diversity == "stroke-count":
         marked = _stroke_count_diverse_subset(marked, int(limit))
-    return tuple(replace(item, truncated=is_truncated) for item in marked[: int(limit)])
+    return tuple(
+        replace(item, truncated=diagnostic.truncated, search_diagnostics=diagnostic)
+        for item in marked[: int(limit)]
+    )
 
 
 def stroke_hypotheses_from_analysis(
@@ -682,6 +814,7 @@ def stroke_hypotheses_from_analysis(
     guide_paths: Sequence[ArrayLike] | None = None,
     limits: StrokeSearchLimits | None = None,
     limit: int = 5,
+    on_limit: Literal["raise", "truncate"] = "raise",
     policy: StrokeSearchPolicy = DEFAULT_STROKE_SEARCH_POLICY,
     diversity: Literal["none", "stroke-count"] = "none",
 ) -> tuple[StrokeHypothesis, ...]:
@@ -695,6 +828,7 @@ def stroke_hypotheses_from_analysis(
         guide_paths=guide_paths,
         limits=limits,
         limit=limit,
+        on_limit=on_limit,
         policy=policy,
         diversity=diversity,
     )
